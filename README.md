@@ -16,13 +16,17 @@ make PDINCLUDEDIR=/path/to/pure-data/src        # Pd >= 0.56 headers
 make install PDLIBDIR=~/Documents/Pd/externals
 ```
 
-The build uses [pd-lib-builder](https://github.com/pure-data/pd-lib-builder) (a submodule): Linux, macOS, Windows (MinGW).
+The build uses [pd-lib-builder](https://github.com/pure-data/pd-lib-builder) (a submodule): Linux, macOS, Windows (MinGW). For double-precision Pd (Pd64) add `floatsize=64 extension=<system>-<cpu>-64.<ext>` (e.g. `linux-amd64-64.so`): everything then computes in `double`, the NEON kernels are left out.
+
+### Fallback without the binary
+
+`tapmatrix~.pd` is an abstraction with the same arguments, inlets, outlets and messages (`tap`, `row`, `rowl`, `jump`, `get`, `ramp`, `clear`; not the flags, `engine`, `check`, `stats`, `q15shift`), built from vanilla objects: per cell `delread4~`, two `line~` and `*~` (helpers `tapmatrix.in~`, `tapmatrix.out~`, `tapmatrix.tap~`). It gives the same output as the external within float rounding, with the same latency, but costs several times as much. It is installed next to the binary: in one folder Pd tries the binary first, so the abstraction only runs where no binary loads (another platform, Pd64 without a 64-bit build). A patch that should prefer an installed binary over a fallback copy elsewhere on its path declares `[declare -stdlib tapmatrix~]`: Pd searches binaries and abstractions folder by folder, so an abstraction in the patch's folder would otherwise win.
 
 ## Creation and messages
 
 `[tapmatrix~ [-float|-q15] <ins> <outs> <maxdelay-ms> [ramp-ms]]`
 
-- `-float` (the default): computes in 32-bit float.
+- `-float` (the default): computes in Pd's sample type (32-bit float; `double` in a Pd64 build).
 - `-q15`: computes in 16-bit fixed point. On the ESP32-P4 with its PIE SIMD unit, several times faster than float; on other platforms the same arithmetic in plain C, slow, for testing only. Signals must stay within ±1.
 - `<ins>`, `<outs>`: channels of the input and output signal. `<maxdelay-ms>`: the longest delay. `[ramp-ms]`: default ramp time (20 ms).
 
@@ -115,11 +119,26 @@ The static FIR loop costs ~31 cycles per tap and sample in the generic build and
 - **Q15 quality.** ~75 dB. Q31 data (two 16-bit passes) would double the kernels' share.
 - **The WFS prefilter** (`biquad~` ×4, `lop~` per source, ~20 µs per source) stays in Pd objects.
 
+## Source layout
+
+| file | what |
+|---|---|
+| `tapmatrix~.c` | the object: state, messages, the block loop (which taps move, which engine) |
+| `arch/platform.h` | timer for `stats` and scratch memory: ESP32, Windows, POSIX |
+| `arch/scalar.h` | the portable kernels in `t_sample` (float or double): coefficients, static FIR, moving tap |
+| `arch/neon.h` | the same with NEON (armv7, arm64), single precision |
+| `arch/q15.h` | the `q15` engine: its data layout, the C kernels (hosts), the declarations of the PIE kernels, a moving tap's preparation |
+| `esp32/tapmatrix_pie.S` | the PIE kernels (ESP32-P4) |
+| `tapmatrix~.pd`, `tapmatrix.*~.pd` | the abstraction fallback |
+
+The kernels are `static` functions in headers, so the build stays one translation unit. A new SIMD architecture is one more header like `arch/neon.h`, included in `tapmatrix~.c` and called where the NEON kernels are.
+
 ## Tests
 
 `tests/msgtest.py` runs Pd in batch mode (`PD=/path/to/pd python3 tests/msgtest.py`, needs numpy): `row`
 and `rowl` must give bit-identical output to the same cells set by `tap`; `jump` is checked sample by sample
 against its model (a linear ramp as input, exact for the 4-point interpolation); `get` and `clear <in>`.
+`TM_PATH=<folder>` tests another `tapmatrix~`, e.g. the fallback alone (a folder with only the `.pd` files).
 
 `tests/` also runs two patches with [libpd](https://github.com/libpd/libpd) and loads the built external as Pd does: `tm.pd` (float engine) and `tmq.pd` (q15 engine, source at −6 dBFS). Each compares a static and a moving tap with Pd's own `delwrite~` → `line~` → `delread4~` → `*~` chain and with an ideal double-precision computation (`ana.py`, needs numpy).
 
@@ -130,11 +149,11 @@ make test PDINCLUDEDIR=/path/to/libpd/pure-data/src LIBPD_DIR=/path/to/libpd   #
 
 ## CI and releases
 
-`.gitlab-ci.yml` builds the external for Linux (amd64, arm64, armv7), Windows (amd64, i386) and, with a macOS runner (`MACOS_RUNNER_TAG`), macOS (`d_fat`: x86_64 + arm64). It runs the tests, and for a version tag (`v1.0` or `1.0`) packages a binary and a sources `.dek` with deken and uploads them to puredata.info. Set `DEKEN_USERNAME` and `DEKEN_PASSWORD` as masked, protected CI variables. Each architecture has its own extension (`l_amd64`, `l_arm64`, `l_arm`, `m_amd64`, `m_i386`, `d_fat`), so one package holds all of them. Binaries are single precision.
+`.gitlab-ci.yml` builds the external for Linux (amd64, arm64, armv7), Windows (amd64, i386) and, with a macOS runner (`MACOS_RUNNER_TAG`), macOS (`d_fat`: x86_64 + arm64). It runs the tests, and for a version tag (`v1.0` or `1.0`) packages a binary and a sources `.dek` with deken and uploads them to puredata.info. Set `DEKEN_USERNAME` and `DEKEN_PASSWORD` as masked, protected CI variables. Each architecture has its own extension (`l_amd64`, `l_arm64`, `l_arm`, `m_amd64`, `m_i386`, `d_fat`; double precision: `linux-amd64-64.so`), so one package holds all of them, together with the abstraction fallback.
 
 ## Origin: pdesp
 
-`tapmatrix~` was written for pdesp (Pure Data on the ESP32-P4), to run a Wave Field Synthesis renderer of 8 sources × 32 speakers on the chip. There it is linked into the firmware and has the `q15` engine with PIE SIMD kernels: `esp32/tapmatrix_pie.S`, built only for the ESP32-P4 (on desktop systems the `q15` engine uses the same arithmetic in C, for testing). pdesp keeps a copy of `tapmatrix~.c` (`components/pd_objects/tapmatrix_tilde.c`): change both together.
+`tapmatrix~` was written for pdesp (Pure Data on the ESP32-P4), to run a Wave Field Synthesis renderer of 8 sources × 32 speakers on the chip. There it is linked into the firmware and has the `q15` engine with PIE SIMD kernels: `esp32/tapmatrix_pie.S`, built only for the ESP32-P4 (on desktop systems the `q15` engine uses the same arithmetic in C, for testing). pdesp keeps a copy of `tapmatrix~.c` (`components/pd_objects/tapmatrix_tilde.c`): change both together. Since the split into `arch/`, the copy needs the `arch/` headers next to it (or this repository as a component).
 
 ## License
 

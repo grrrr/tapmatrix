@@ -5,8 +5,10 @@
 #   DEKEN_USERNAME, DEKEN_PASSWORD   puredata.info account (masked, protected); only the upload needs them
 #   MACOS_RUNNER_TAG                 tag of a macOS runner; without it the macOS build is skipped
 #
-# Binaries are single precision (Pd's default). Each architecture has its own
-# extension, so they all fit into one deken package (Pd >= 0.51 loads these).
+# Binaries are single precision (Pd's default), plus double precision for Linux
+# amd64 (floatsize=64). Each architecture has its own extension, so they all fit
+# into one deken package (Pd >= 0.51 loads these). Elsewhere the abstraction
+# fallback (tapmatrix~.pd, packaged next to the binaries) runs.
 
 variables:
   PD_VERSION: "0.56-2"            # Pd release for the headers (and pd.dll on Windows): >= 0.56 for multichannel
@@ -45,6 +47,10 @@ stages: [build, test, package, deploy]
 linux-amd64:
   extends: .linux
   variables: { PACKAGES: "gcc libc6-dev", EXT: "l_amd64", MAKEFLAGS_EXTRA: "" }
+
+linux-amd64-64:
+  extends: .linux
+  variables: { PACKAGES: "gcc libc6-dev", EXT: "linux-amd64-64.so", MAKEFLAGS_EXTRA: "floatsize=64" }
 
 linux-arm64:
   extends: .linux
@@ -121,8 +127,8 @@ package:
   script:
     - VERSION="${CI_COMMIT_TAG#v}"; VERSION="${VERSION:-0.0.0-$CI_COMMIT_SHORT_SHA}"
     - mkdir -p bin/tapmatrix~ src/tapmatrix~ dek
-    - cp out/* tapmatrix~-help.pd README.md LICENSE.txt bin/tapmatrix~/
-    - cp tapmatrix~.c Makefile tapmatrix~-help.pd README.md LICENSE.txt src/tapmatrix~/ && cp -r esp32 tests src/tapmatrix~/
+    - cp out/* tapmatrix~-help.pd tapmatrix~.pd tapmatrix.*~.pd README.md LICENSE.txt bin/tapmatrix~/
+    - cp tapmatrix~.c Makefile tapmatrix~-help.pd tapmatrix~.pd tapmatrix.*~.pd README.md LICENSE.txt src/tapmatrix~/ && cp -r arch esp32 tests src/tapmatrix~/
     - (cd bin && deken package --version "$VERSION" tapmatrix~ && mv *.dek* ../dek/)
     - (cd src && deken package --version "$VERSION" tapmatrix~ && mv *.dek* ../dek/)
     - ls -l dek

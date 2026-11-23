@@ -1,0 +1,10 @@
+#N canvas 50 50 727 250 12;
+#X text 10 10 tapmatrix.out~ <j> <parent \$0> <ins> (clone -do in tapmatrix~.pd) -- output j: the sum of its ins taps (one tapmatrix.tap~ per input), f 72;
+#X obj 10 53 inlet;
+#X obj 67 53 inlet~;
+#X text 123 53 (unused: the delay lines' silent outlet \, for the DSP order);
+#X obj 10 98 clone tapmatrix.tap~ \$3 \$2 \$1;
+#X text 199 98 '<i> <message>' to the tap of input i \; clone sums the taps' outlets (no -do), f 72;
+#X obj 10 159 outlet~;
+#X connect 1 0 4 0;
+#X connect 4 0 6 0;
