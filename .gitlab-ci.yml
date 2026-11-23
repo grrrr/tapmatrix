@@ -18,7 +18,10 @@ variables:
 
 stages: [build, test, package, deploy]
 
-tags: [docker, default]
+.docker:
+  tags:
+    - docker
+    - default
 
 .pd_headers: &pd_headers
   - git clone --depth 1 --branch "$PD_VERSION" "$PD_SRC_URL" /tmp/pure-data
@@ -27,6 +30,7 @@ tags: [docker, default]
 .linux:
   stage: build
   image: debian:bookworm
+  extends: .docker
   before_script:
     - apt-get update -qq
     - apt-get install -y -qq --no-install-recommends make git ca-certificates $PACKAGES
@@ -53,6 +57,7 @@ linux-armv7:
 .windows:
   stage: build
   image: debian:bookworm
+  extends: .docker
   before_script:
     - apt-get update -qq
     - apt-get install -y -qq --no-install-recommends make git ca-certificates curl unzip $PACKAGES
