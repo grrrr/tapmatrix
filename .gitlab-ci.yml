@@ -1,0 +1,139 @@
+# tapmatrix~: build the external for the usual platforms, test it, and on a
+# version tag (v1.0, 1.0, ...) package it with deken and upload it to puredata.info.
+#
+# CI/CD variables to set in the project (Settings > CI/CD > Variables):
+#   DEKEN_USERNAME, DEKEN_PASSWORD   puredata.info account (masked, protected); only the upload needs them
+#   MACOS_RUNNER_TAG                 tag of a macOS runner; without it the macOS build is skipped
+#
+# Binaries are single precision (Pd's default). Each architecture has its own
+# extension, so they all fit into one deken package (Pd >= 0.51 loads these).
+
+variables:
+  PD_VERSION: "0.56-2"            # Pd release for the headers (and pd.dll on Windows): >= 0.56 for multichannel
+  PD_SRC_URL: "https://github.com/pure-data/pure-data.git"
+  PD_WIN64_URL: "https://msp.ucsd.edu/Software/pd-${PD_VERSION}.msw.zip"
+  PD_WIN32_URL: "https://msp.ucsd.edu/Software/pd-${PD_VERSION}-i386.msw.zip"
+  GIT_SUBMODULE_STRATEGY: recursive   # pd-lib-builder
+  GIT_SUBMODULE_FORCE_HTTPS: "true"
+
+stages: [build, test, package, deploy]
+
+.pd_headers: &pd_headers
+  - git clone --depth 1 --branch "$PD_VERSION" "$PD_SRC_URL" /tmp/pure-data
+  - export PDINCLUDEDIR=/tmp/pure-data/src
+
+.linux:
+  stage: build
+  image: debian:bookworm
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends make git ca-certificates $PACKAGES
+    - *pd_headers
+  script:
+    - make PDINCLUDEDIR=$PDINCLUDEDIR $MAKEFLAGS_EXTRA extension=$EXT
+    - mkdir -p out && cp *.$EXT out/
+  artifacts:
+    paths: [out/]
+    expire_in: 1 week
+
+linux-amd64:
+  extends: .linux
+  variables: { PACKAGES: "gcc libc6-dev", EXT: "l_amd64", MAKEFLAGS_EXTRA: "" }
+
+linux-arm64:
+  extends: .linux
+  variables: { PACKAGES: "gcc-aarch64-linux-gnu libc6-dev-arm64-cross", EXT: "l_arm64", MAKEFLAGS_EXTRA: "PLATFORM=aarch64-linux-gnu" }
+
+linux-armv7:
+  extends: .linux
+  variables: { PACKAGES: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross", EXT: "l_arm", MAKEFLAGS_EXTRA: "PLATFORM=arm-linux-gnueabihf" }
+
+.windows:
+  stage: build
+  image: debian:bookworm
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends make git ca-certificates curl unzip $PACKAGES
+    - *pd_headers
+    - curl -fsSL -o /tmp/pd.zip "$PD_URL" && unzip -q /tmp/pd.zip -d /tmp/pdwin
+    - export PDBINDIR=$(dirname "$(find /tmp/pdwin -name pd.dll | head -1)")
+  script:
+    - make PDINCLUDEDIR=$PDINCLUDEDIR PDBINDIR=$PDBINDIR PLATFORM=$TRIPLET extension=$EXT
+    - mkdir -p out && cp *.$EXT out/
+  artifacts:
+    paths: [out/]
+    expire_in: 1 week
+
+windows-amd64:
+  extends: .windows
+  variables: { PACKAGES: "gcc-mingw-w64-x86-64", TRIPLET: "x86_64-w64-mingw32", EXT: "m_amd64", PD_URL: "$PD_WIN64_URL" }
+
+windows-i386:
+  extends: .windows
+  variables: { PACKAGES: "gcc-mingw-w64-i686", TRIPLET: "i686-w64-mingw32", EXT: "m_i386", PD_URL: "$PD_WIN32_URL" }
+
+macos-fat:
+  stage: build
+  tags: [$MACOS_RUNNER_TAG]
+  rules:
+    - if: $MACOS_RUNNER_TAG
+  script:
+    - git clone --depth 1 --branch "$PD_VERSION" "$PD_SRC_URL" /tmp/pure-data
+    - make PDINCLUDEDIR=/tmp/pure-data/src extension=d_fat arch="x86_64 arm64"
+    - mkdir -p out && cp *.d_fat out/
+  artifacts:
+    paths: [out/]
+    expire_in: 1 week
+
+# the host tests (tests/): the Linux build against libpd, compared with Pd's own
+# delwrite~ -> line~ -> delread4~ chain and an ideal double-precision computation
+test:
+  stage: test
+  image: debian:bookworm
+  needs: []
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends make git ca-certificates gcc g++ libc6-dev python3-numpy
+    - git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/libpd/libpd.git /tmp/libpd
+    - make -C /tmp/libpd -j4 libpd
+  script:
+    - make PDINCLUDEDIR=/tmp/libpd/pure-data/src
+    - make test PDINCLUDEDIR=/tmp/libpd/pure-data/src LIBPD_DIR=/tmp/libpd | tee test.txt
+  artifacts:
+    paths: [test.txt]
+    expire_in: 1 month
+
+# one binary package with all architectures, one sources package (deken wants both)
+package:
+  stage: package
+  image: { name: "registry.git.iem.at/pd/deken", entrypoint: [""] }   # deken is not on PyPI
+  rules:
+    - if: $CI_COMMIT_TAG
+    - when: manual
+      allow_failure: true
+  script:
+    - VERSION="${CI_COMMIT_TAG#v}"; VERSION="${VERSION:-0.0.0-$CI_COMMIT_SHORT_SHA}"
+    - mkdir -p bin/tapmatrix~ src/tapmatrix~ dek
+    - cp out/* tapmatrix~-help.pd README.md LICENSE.txt bin/tapmatrix~/
+    - cp tapmatrix~.c Makefile tapmatrix~-help.pd README.md LICENSE.txt src/tapmatrix~/ && cp -r esp32 tests src/tapmatrix~/
+    - (cd bin && deken package --version "$VERSION" tapmatrix~ && mv *.dek* ../dek/)
+    - (cd src && deken package --version "$VERSION" tapmatrix~ && mv *.dek* ../dek/)
+    - ls -l dek
+  artifacts:
+    paths: [dek/]
+    expire_in: 1 month
+
+# upload to puredata.info, only for version tags
+deploy:
+  stage: deploy
+  image: { name: "registry.git.iem.at/pd/deken", entrypoint: [""] }
+  needs: [package]
+  rules:
+    - if: $CI_COMMIT_TAG && $DEKEN_USERNAME && $DEKEN_PASSWORD
+  before_script:
+    - mkdir -p ~/.config/deken
+    # deken reads the account from its config file (no password variable)
+    - printf 'username = %s\npassword = %s\n' "$DEKEN_USERNAME" "$DEKEN_PASSWORD" > ~/.config/deken/config
+    - chmod 600 ~/.config/deken/config
+  script:
+    - deken upload dek/*.dek
