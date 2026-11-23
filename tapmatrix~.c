@@ -47,6 +47,14 @@
  * sample; its read position is a 32.32 integer. Ramps are counted in whole
  * blocks, each block's values computed from the ramp's ends.
  */
+/* 32-bit Linux (armhf) with a 64-bit time_t default (Debian trixie and later):
+   clock_gettime() would become __clock_gettime64@GLIBC_2.34 and the binary would
+   not load on older systems. The timer for "stats" (arch/platform.h) is the only
+   use of time types here, so take the old 32-bit ABI. Before any system header. */
+#if defined(__linux__) && defined(__arm__)
+#undef _TIME_BITS
+#undef _FILE_OFFSET_BITS
+#endif
 #include <math.h>
 #include <stdint.h>
 #include <string.h>

@@ -149,7 +149,7 @@ make test PDINCLUDEDIR=/path/to/libpd/pure-data/src LIBPD_DIR=/path/to/libpd   #
 
 ## CI and releases
 
-`.gitlab-ci.yml` builds the external for Linux (amd64, arm64, armv7), Windows (amd64, i386) and, with a macOS runner (`MACOS_RUNNER_TAG`), macOS (`d_fat`: x86_64 + arm64). It runs the tests, and for a version tag (`v1.0` or `1.0`) packages a binary and a sources `.dek` with deken and uploads them to puredata.info. Set `DEKEN_USERNAME` and `DEKEN_PASSWORD` as masked, protected CI variables. Each architecture has its own extension (`l_amd64`, `l_arm64`, `l_arm`, `m_amd64`, `m_i386`, `d_fat`; double precision: `linux-amd64-64.so`), so one package holds all of them, together with the abstraction fallback.
+`.gitlab-ci.yml` builds the external on Debian trixie for Linux (amd64, arm64, armv7), Windows (amd64, i386) and, with a macOS runner (`MACOS_RUNNER_TAG`), macOS (`d_fat`: x86_64 + arm64). It runs the tests, and for a version tag (`v1.0` or `1.0`) packages a binary and a sources `.dek` with deken and uploads them to puredata.info. Set `DEKEN_USERNAME` and `DEKEN_PASSWORD` as masked, protected CI variables. Each architecture has its own extension (`l_amd64`, `l_arm64`, `l_arm`, `m_amd64`, `m_i386`, `d_fat`; double precision: `linux-amd64-64.so`), so one package holds all of them, together with the abstraction fallback. The Linux binaries must still load on older systems: `tests/check_glibc.sh` fails the build if one needs a glibc newer than `GLIBC_MAX` (2.28; today they need 2.17). On armhf, trixie defaults to a 64-bit `time_t`, which would make `clock_gettime` require glibc 2.34: `tapmatrix~.c` undefines `_TIME_BITS` there (only the `stats` timer uses time types).
 
 ## Origin: pdesp
 

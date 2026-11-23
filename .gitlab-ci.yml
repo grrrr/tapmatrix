@@ -12,6 +12,9 @@
 
 variables:
   PD_VERSION: "0.56-2"            # Pd release for the headers (and pd.dll on Windows): >= 0.56 for multichannel
+  # Linux binaries are built on trixie (newer gcc) but must load on older
+  # systems: no glibc symbol newer than this (2.28: Debian buster, Ubuntu 18.10)
+  GLIBC_MAX: "2.28"
   PD_SRC_URL: "https://github.com/pure-data/pure-data.git"
   PD_WIN64_URL: "https://msp.ucsd.edu/Software/pd-${PD_VERSION}.msw.zip"
   PD_WIN32_URL: "https://msp.ucsd.edu/Software/pd-${PD_VERSION}-i386.msw.zip"
@@ -31,14 +34,15 @@ stages: [build, test, package, deploy]
 
 .linux:
   stage: build
-  image: debian:bookworm
+  image: debian:trixie
   extends: .docker
   before_script:
     - apt-get update -qq
-    - apt-get install -y -qq --no-install-recommends make git ca-certificates $PACKAGES
+    - apt-get install -y -qq --no-install-recommends make git ca-certificates binutils $PACKAGES
     - *pd_headers
   script:
     - make PDINCLUDEDIR=$PDINCLUDEDIR $MAKEFLAGS_EXTRA extension=$EXT
+    - sh tests/check_glibc.sh "$GLIBC_MAX" *.$EXT
     - mkdir -p out && cp *.$EXT out/
   artifacts:
     paths: [out/]
@@ -62,7 +66,7 @@ linux-armv7:
 
 .windows:
   stage: build
-  image: debian:bookworm
+  image: debian:trixie
   extends: .docker
   before_script:
     - apt-get update -qq
@@ -102,7 +106,7 @@ macos-fat:
 # delwrite~ -> line~ -> delread4~ chain and an ideal double-precision computation
 test:
   stage: test
-  image: debian:bookworm
+  image: debian:trixie
   needs: []
   before_script:
     - apt-get update -qq
