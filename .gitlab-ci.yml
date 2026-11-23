@@ -10,6 +10,8 @@
 # into one deken package (Pd >= 0.51 loads these). Elsewhere the abstraction
 # fallback (tapmatrix~.pd, packaged next to the binaries) runs.
 
+tags: [docker, default]
+
 variables:
   PD_VERSION: "0.56-2"            # Pd release for the headers (and pd.dll on Windows): >= 0.56 for multichannel
   # Linux binaries are built on trixie (newer gcc) but must load on older
