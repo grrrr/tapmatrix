@@ -18,6 +18,8 @@ variables:
 
 stages: [build, test, package, deploy]
 
+tags: [docker, default]
+
 .pd_headers: &pd_headers
   - git clone --depth 1 --branch "$PD_VERSION" "$PD_SRC_URL" /tmp/pure-data
   - export PDINCLUDEDIR=/tmp/pure-data/src
