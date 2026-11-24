@@ -1,8 +1,8 @@
 #N canvas 50 50 601 250 12;
 #X text 10 10 tapmatrix.in~ <i> <parent \$0> <maxdelay-ms> (clone -d in tapmatrix~.pd) -- delay line of input i, f 72;
 #X obj 10 53 inlet~;
-#X obj 10 98 delwrite~ \$2-d-\$1 \$3;
-#X obj 172 98 *~ 0;
+#X obj 54 102 delwrite~ \$2-d-\$1 \$3;
+#X obj 10 102 *~ 0;
 #X obj 10 143 outlet~;
 #X text 73 143 silent: into the outputs' inlet~ only to sort every delwrite~ before the taps' delread4~ (else they read a block late), f 72;
 #X connect 1 0 2 0;
