@@ -1,5 +1,5 @@
 /*
- * [tapmatrix~ [-float|-q15] <ins> <outs> <maxdelay-ms> [ramp-ms]]
+ * [tapmatrix~ [-float|-fixed] <ins> <outs> <maxdelay-ms> [ramp-ms]]
  *
  * A matrix of fractional delays: every input -> output cell is a tap with its
  * own delay and gain. Input: one multichannel signal (<ins> channels, missing
@@ -24,20 +24,20 @@
  *   get <in> <delay-array> <gain-array>         the row's current delays (ms), gains
  *   ramp <ms>                                   default ramp time
  *   clear [in]                                  all gains (or one input's) to 0 at once
- *   engine float|q15                            switch the engine (also the flag
+ *   engine float|fixed                            switch the engine (also the flag
  *                                               at creation; float is the default).
- *                                               q15: 16-bit fixed point (ESP32-P4:
+ *                                               fixed: 16-bit fixed point (ESP32-P4:
  *                                               PIE SIMD; host: the same in C, for tests)
- *   check <blocks>                              accuracy test, q15 only: for that many
+ *   check <blocks>                              accuracy test, fixed only: for that many
  *                                               blocks also compute everything in
  *                                               float and compare; then the right
  *                                               outlet sends "check <snr-db> <peak-error>"
  *   stats <blocks>                              time measurement: averaged over that
  *                                               many blocks, the right outlet sends
- *                                               "stats <moving-q15> <moving-float>
+ *                                               "stats <moving-fixed> <moving-float>
  *                                               <us-total> <us-inputs> <us-moving-prep>
  *                                               <us-moving-kernel> <us-static-kernel>"
- *   q15shift <n>                                accumulator shift for PIE (test)
+ *   fixedshift <n>                                accumulator shift for PIE (test)
  *
  * How it computes (per block of n samples): the inputs go into ring buffers
  * (PSRAM, via getbytes; the last n+3 samples mirrored in front, so a block's
@@ -64,7 +64,8 @@
 #include "arch/platform.h"
 #include "arch/scalar.h"
 #include "arch/neon.h"
-#include "arch/q15.h"
+#include "arch/avx2.h"
+#include "arch/fixed.h"
 
 static t_class *tapmatrix_class;
 
@@ -73,7 +74,7 @@ typedef struct {
     t_sample dfrom, dto, gfrom, gto;    /* ramp: from, to */
     int nb, left;                   /* ramp: blocks in all, left */
     t_sample inb;                   /* 1 / nb */
-    t_q15tap q;                     /* q15 engine, moving */
+    t_fixedtap q;                     /* fixed engine, moving */
     int hvalid;                     /* h, qh hold the coefficients of d, g */
     t_sample h[4];
     int16_t qh[4];
@@ -93,7 +94,7 @@ typedef struct _tapmatrix {
     t_tap *x_tap;                   /* [outs][ins] */
     int *x_jleft;                   /* [ins] jump: blocks to the dip's turning point + 1, 0 = none */
     int *x_jxb;                     /* [ins] jump: fade length in blocks */
-    int x_q15;
+    int x_fixed;
     int16_t *x_qring;               /* [ins][mir + len], Q15 copy */
     int16_t *x_qcoef;               /* [ins * 4] scratch per output */
     const int16_t **x_qsrc;         /* [ins] */
@@ -104,11 +105,11 @@ typedef struct _tapmatrix {
     int x_qshift;
     int x_check;                    /* blocks still to compare */
     int x_stats;                    /* blocks still to count ("stats") */
-    uint32_t x_st[8];               /* blocks, q15 moving, float moving, cycles:
+    uint32_t x_st[8];               /* blocks, fixed moving, float moving, cycles:
                                        inputs, prep, moving kernel, static kernel, all */
     double x_es, x_ee;              /* signal and error energy */
     t_sample x_emax;
-    t_sample *x_fcheck;                /* [n] float reference of the q15 part */
+    t_sample *x_fcheck;                /* [n] float reference of the fixed part */
     t_outlet *x_info;
     t_clock *x_clock;               /* reports the check outside the DSP tick */
     t_clock *x_sclock;              /* and the stats */
@@ -127,7 +128,7 @@ static void tapmatrix_freebuf(t_tapmatrix *x)
 
 static void tapmatrix_allocq(t_tapmatrix *x)
 {
-    if (!x->x_q15 || x->x_qring || !x->x_n) return;
+    if (!x->x_fixed || x->x_qring || !x->x_n) return;
     x->x_qring = (int16_t *)getbytes(x->x_ins * (x->x_mir + x->x_len) * sizeof(int16_t));
     x->x_qmem = fastmem(2 * x->x_n * sizeof(int16_t) + 32);
     x->x_qout = (int16_t *)(((uintptr_t)x->x_qmem + 15) & ~(uintptr_t)15);
@@ -331,17 +332,17 @@ static void tapmatrix_clear(t_tapmatrix *x, t_symbol *s, int argc, t_atom *argv)
 
 static void tapmatrix_engine(t_tapmatrix *x, t_symbol *s)
 {
-    if (s == gensym("q15")) {
-        if (!TAPMATRIX_Q15) {
-            pd_error(x, "tapmatrix~: no q15 engine on this platform");
+    if (s == gensym("fixed")) {
+        if (!TAPMATRIX_FIXED) {
+            pd_error(x, "tapmatrix~: no fixed engine on this platform");
             return;
         }
-        x->x_q15 = 1;
+        x->x_fixed = 1;
         tapmatrix_allocq(x);
         for (int i = 0; i < x->x_ins * x->x_outs; i++) x->x_tap[i].q.mv = 0;
     } else if (s == gensym("float")) {
-        x->x_q15 = 0;
-    } else pd_error(x, "tapmatrix~: engine float or q15");
+        x->x_fixed = 0;
+    } else pd_error(x, "tapmatrix~: engine float or fixed");
 }
 
 static void tapmatrix_check(t_tapmatrix *x, t_floatarg f)
@@ -357,11 +358,11 @@ static void tapmatrix_stats(t_tapmatrix *x, t_floatarg f)
     x->x_stats = f > 0 ? f : 0;
 }
 
-/* "stats <moving-q15> <moving-float> <us-total> <us-inputs> <us-moving-prep>
+/* "stats <moving-fixed> <moving-float> <us-total> <us-inputs> <us-moving-prep>
    <us-moving-kernel> <us-static-kernel>": per block, averaged over the
-   blocks counted: moving taps computed in q15 / in float, then microseconds:
+   blocks counted: moving taps computed in fixed / in float, then microseconds:
    the whole object, writing the inputs into the delay lines, preparing the
-   moving taps, the moving-tap kernel, the static-tap kernel (q15 only) */
+   moving taps, the moving-tap kernel, the static-tap kernel (fixed only) */
 static void tapmatrix_stats_report(t_tapmatrix *x)
 {
     const float b = x->x_st[0] ? x->x_st[0] : 1, us = 1.f / (CYCLES_PER_US * b);
@@ -377,7 +378,7 @@ static void tapmatrix_stats_report(t_tapmatrix *x)
     outlet_anything(x->x_info, gensym("list"), 8, a);
 }
 
-static void tapmatrix_q15shift(t_tapmatrix *x, t_floatarg f)
+static void tapmatrix_fixedshift(t_tapmatrix *x, t_floatarg f)
 {
     x->x_qshift = f;
 }
@@ -414,18 +415,18 @@ static t_int *tapmatrix_perform(t_int *w)
                 t_tap *t = &x->x_tap[o * ins + c];
                 tap_set(t, t->pd, t->pg, x->x_jxb[c]);
             }
-    const int q15 = TAPMATRIX_Q15 && x->x_q15 && x->x_qring && !(n & 7) && n <= 64;
+    const int fixed = TAPMATRIX_FIXED && x->x_fixed && x->x_qring && !(n & 7) && n <= 64;
     const t_sample inv_n = TMK(1) / n;
     /* inputs into the rings (before any output is written: in and out may overlap).
        The block is contiguous in the ring up to its end (wpos is a multiple of n
        when len is: both powers of 2); the last mir samples are mirrored in front. */
     for (int c = 0; c < ins; c++) {
         t_sample *r = x->x_ring + c * stride + mir + wpos;
-        int16_t *q = q15 ? x->x_qring + c * stride + mir + wpos : 0;
+        int16_t *q = fixed ? x->x_qring + c * stride + mir + wpos : 0;
         const t_sample *src = c < inch ? in + c * n : 0;
         if (src) memcpy(r, src, n * sizeof(t_sample));
         else memset(r, 0, n * sizeof(t_sample));
-        if (q) q15_from(r, q, n);
+        if (q) fixed_from(r, q, n);
         const int m0 = len - mir;               /* mirror [m0, len) to [0, mir) */
         if (wpos + n > m0) {
             const int from = wpos > m0 ? wpos : m0;
@@ -455,19 +456,24 @@ static t_int *tapmatrix_perform(t_int *w)
                 t->hvalid = 0;
                 const t_sample dd = (t->d - d0) * inv_n, gd = (t->g - g0) * inv_n;
                 const uint32_t cp = CYCLES();
-                if (q15 && tm_fabs(dd) < TMK(1.0 / 7)) {
+                if (fixed && tm_fabs(dd) < TMK(1.0 / 7)) {
                     /* the ramp's step from its ends: the per-block values carry
                        float rounding (0.0015 samples over a ramp at 2200 samples) */
-                    if (!t->q.mv) q15_ramp_start(&t->q, wpos, d0, (t->dto - t->dfrom) * t->inb * inv_n,
+                    if (!t->q.mv) fixed_ramp_start(&t->q, wpos, d0, (t->dto - t->dfrom) * t->inb * inv_n,
                                            g0, (t->gto - t->gfrom) * t->inb * inv_n);
 
-                    q15_ramp_block(&t->q, &x->x_mv[nm++], x->x_qring + c * stride, len, mask, mir, n);
+                    fixed_ramp_block(&t->q, &x->x_mv[nm++], x->x_qring + c * stride, len, mask, mir, n);
                     if (!t->left) t->q.mv = 0;
                     n_mq++;
                     c_prep += CYCLES() - cp;
                     if (x->x_check) moving(r + mir, mask, wpos, d0, dd, g0, gd, x->x_fcheck, n);
                 } else {
                     t->q.mv = 0;
+#if TAPMATRIX_AVX2
+                    if (tm_avx2 && !(n & 7) && tm_fabs(dd) < TMK(1.0 / 7))
+                        moving_avx2(r + mir, mask, len, wpos, d0, dd, g0, gd, y, n);
+                    else
+#endif
 #if TAPMATRIX_NEON
                     if (!(n & 3) && tm_fabs(dd) < TMK(1.0 / 3))
                         moving_neon(r + mir, mask, len, wpos, d0, dd, g0, gd, y, n);
@@ -488,14 +494,18 @@ static t_int *tapmatrix_perform(t_int *w)
             const int a1 = a0 + n > len ? a0 - len : a0;
             if (!t->hvalid) {       /* only when the tap changed */
                 coeffs(frac, t->g, t->h);
-                for (int k = 0; k < 4; k++) t->qh[k] = to_q15(t->h[k]);
+                for (int k = 0; k < 4; k++) t->qh[k] = to_fixed(t->h[k]);
                 t->hvalid = 1;
             }
-            if (q15) {
+            if (fixed) {
                 memcpy(x->x_qcoef + nq * 4, t->qh, sizeof(t->qh));
                 x->x_qsrc[nq++] = x->x_qring + c * stride + mir + a1;
                 if (x->x_check) fir4(r + mir + a1, t->h, x->x_fcheck, n);
             } else {
+#if TAPMATRIX_AVX2
+                if (tm_avx2 && !(n & 7)) fir4_avx2(r + mir + a1, t->h, y, n);
+                else
+#endif
 #if TAPMATRIX_NEON
                 if (!(n & 3)) fir4_neon(r + mir + a1, t->h, y, n);
                 else
@@ -503,13 +513,13 @@ static t_int *tapmatrix_perform(t_int *w)
                 fir4(r + mir + a1, t->h, y, n);
             }
         }
-#if TAPMATRIX_Q15
-        if (q15 && (nq || nm)) {
+#if TAPMATRIX_FIXED
+        if (fixed && (nq || nm)) {
             int16_t *qo = x->x_qout, *qm = x->x_qout2;
             const uint32_t c0 = CYCLES();
-            if (nq) tapmatrix_q15_sum(x->x_qsrc, x->x_qcoef, nq, qo, n >> 3, x->x_qshift);
+            if (nq) tapmatrix_fixed_sum(x->x_qsrc, x->x_qcoef, nq, qo, n >> 3, x->x_qshift);
             const uint32_t c1 = CYCLES();
-            if (nm) tapmatrix_q15_moving(x->x_mv, nm, qm, n >> 3);
+            if (nm) tapmatrix_fixed_moving(x->x_mv, nm, qm, n >> 3);
             c_sk += c1 - c0;
             c_mk += CYCLES() - c1;
             if (!nq) { qo = qm; qm = 0; }   /* one or both: add only what is there */
@@ -556,13 +566,13 @@ static void *tapmatrix_new(t_symbol *s, int argc, t_atom *argv)
 {
     t_tapmatrix *x = (t_tapmatrix *)pd_new(tapmatrix_class);
     (void)s;
-    /* flags first: -float (the default) or -q15 */
+    /* flags first: -float (the default) or -fixed */
     while (argc && argv->a_type == A_SYMBOL && argv->a_w.w_symbol->s_name[0] == '-') {
         const t_symbol *f = argv->a_w.w_symbol;
-        if (f == gensym("-q15")) {
-            if (TAPMATRIX_Q15) x->x_q15 = 1;
-            else pd_error(x, "tapmatrix~: no q15 engine on this platform: float");
-        } else if (f == gensym("-float")) x->x_q15 = 0;
+        if (f == gensym("-fixed")) {
+            if (TAPMATRIX_FIXED) x->x_fixed = 1;
+            else pd_error(x, "tapmatrix~: no fixed engine on this platform: float");
+        } else if (f == gensym("-float")) x->x_fixed = 0;
         else pd_error(x, "tapmatrix~: unknown flag %s", f->s_name);
         argc--, argv++;
     }
@@ -602,6 +612,7 @@ static void tapmatrix_free(t_tapmatrix *x)
 
 void tapmatrix_tilde_setup(void)
 {
+    tm_avx2_init();
     tapmatrix_class = class_new(gensym("tapmatrix~"), (t_newmethod)tapmatrix_new,
         (t_method)tapmatrix_free, sizeof(t_tapmatrix), CLASS_MULTICHANNEL, A_GIMME, 0);
     CLASS_MAINSIGNALIN(tapmatrix_class, t_tapmatrix, x_f);
@@ -616,5 +627,5 @@ void tapmatrix_tilde_setup(void)
     class_addmethod(tapmatrix_class, (t_method)tapmatrix_engine, gensym("engine"), A_SYMBOL, 0);
     class_addmethod(tapmatrix_class, (t_method)tapmatrix_check, gensym("check"), A_FLOAT, 0);
     class_addmethod(tapmatrix_class, (t_method)tapmatrix_stats, gensym("stats"), A_FLOAT, 0);
-    class_addmethod(tapmatrix_class, (t_method)tapmatrix_q15shift, gensym("q15shift"), A_FLOAT, 0);
+    class_addmethod(tapmatrix_class, (t_method)tapmatrix_fixedshift, gensym("fixedshift"), A_FLOAT, 0);
 }

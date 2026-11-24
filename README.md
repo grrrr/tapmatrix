@@ -1,6 +1,6 @@
 # tapmatrix~: a matrix of fractional delays for Pd
 
-`[tapmatrix~ [-float|-q15] <ins> <outs> <maxdelay-ms> [ramp-ms]]` takes one multichannel signal with `<ins>` channels and gives one with `<outs>` channels. Every input → output cell is a tap with its own delay and gain. Each output is the sum of its taps. Delays are read with Pd's 4-point interpolation, the same as `delread4~`.
+`[tapmatrix~ [-float|-fixed] <ins> <outs> <maxdelay-ms> [ramp-ms]]` takes one multichannel signal with `<ins>` channels and gives one with `<outs>` channels. Every input → output cell is a tap with its own delay and gain. Each output is the sum of its taps. Delays are read with Pd's 4-point interpolation, the same as `delread4~`.
 
 What it is for: Wave Field Synthesis (sources × speakers), multi-tap delays, delay-based panning, matrix mixing with delays. It replaces, per cell, the chain `delwrite~` → `line~` → `delread4~` → `line~` → `*~` → `+~`: in float 2.5× faster than that chain, and more accurate while delays ramp.
 
@@ -20,14 +20,14 @@ The build uses [pd-lib-builder](https://github.com/pure-data/pd-lib-builder) (a 
 
 ### Fallback without the binary
 
-`tapmatrix~.pd` is an abstraction with the same arguments, inlets, outlets and messages (`tap`, `row`, `rowl`, `jump`, `get`, `ramp`, `clear`; not the flags, `engine`, `check`, `stats`, `q15shift`), built from vanilla objects: per cell `delread4~`, two `line~` and `*~` (helpers `tapmatrix.in~`, `tapmatrix.out~`, `tapmatrix.tap~`). It gives the same output as the external within float rounding, with the same latency, but costs several times as much. It is installed next to the binary: in one folder Pd tries the binary first, so the abstraction only runs where no binary loads (another platform, Pd64 without a 64-bit build). A patch that should prefer an installed binary over a fallback copy elsewhere on its path declares `[declare -stdlib tapmatrix~]`: Pd searches binaries and abstractions folder by folder, so an abstraction in the patch's folder would otherwise win.
+`tapmatrix~.pd` is an abstraction with the same arguments, inlets, outlets and messages (`tap`, `row`, `rowl`, `jump`, `get`, `ramp`, `clear`; not the flags, `engine`, `check`, `stats`, `fixedshift`), built from vanilla objects: per cell `delread4~`, two `line~` and `*~` (helpers `tapmatrix.in~`, `tapmatrix.out~`, `tapmatrix.tap~`). It gives the same output as the external within float rounding, with the same latency, but costs several times as much. It is installed next to the binary: in one folder Pd tries the binary first, so the abstraction only runs where no binary loads (another platform, Pd64 without a 64-bit build). A patch that should prefer an installed binary over a fallback copy elsewhere on its path declares `[declare -stdlib tapmatrix~]`: Pd searches binaries and abstractions folder by folder, so an abstraction in the patch's folder would otherwise win.
 
 ## Creation and messages
 
-`[tapmatrix~ [-float|-q15] <ins> <outs> <maxdelay-ms> [ramp-ms]]`
+`[tapmatrix~ [-float|-fixed] <ins> <outs> <maxdelay-ms> [ramp-ms]]`
 
 - `-float` (the default): computes in Pd's sample type (32-bit float; `double` in a Pd64 build).
-- `-q15`: computes in 16-bit fixed point. On the ESP32-P4 with its PIE SIMD unit, several times faster than float; on other platforms the same arithmetic in plain C, slow, for testing only. Signals must stay within ±1.
+- `-fixed`: computes in 16-bit fixed point. On the ESP32-P4 with its PIE SIMD unit, several times faster than float; on other platforms the same arithmetic in plain C, slow, for testing only. Signals must stay within ±1.
 - `<ins>`, `<outs>`: channels of the input and output signal. `<maxdelay-ms>`: the longest delay. `[ramp-ms]`: default ramp time (20 ms).
 
 | message | what |
@@ -39,35 +39,35 @@ The build uses [pd-lib-builder](https://github.com/pure-data/pd-lib-builder) (a 
 | `get <in> <delay-array> <gain-array>` | the row's current delays (ms) and gains, also mid-ramp |
 | `ramp <ms>` | default ramp time for later `tap` messages |
 | `clear [in]` | all gains (or one input's row) to 0 at once; also ends a running jump |
-| `engine float` / `engine q15` | switch the engine while running (the same as the creation flag) |
-| `check <blocks>` | **accuracy test**, `q15` only. For that many blocks the object also computes everything in float and compares the two. Then the right outlet sends `check <snr-db> <peak-error>`: signal-to-error ratio of q15 against float in dB, and the largest difference in sample values. Costs about as much again while it runs. |
-| `stats <blocks>` | **time measurement**. Averaged over that many blocks, the right outlet sends `stats <moving-q15> <moving-float> <us-total> <us-inputs> <us-moving-prep> <us-moving-kernel> <us-static-kernel>`: per block, how many moving taps were computed in q15 and in float, then microseconds for the whole object, for writing the inputs into the delay lines, for preparing the moving taps, for the moving-tap computation and for the static-tap computation (the last three: q15). Measured with the cycle counter on the ESP32, with the system clock elsewhere. |
-| `q15shift <n>` | the accumulator shift of the PIE kernels (15; a test switch) |
+| `engine float` / `engine fixed` | switch the engine while running (the same as the creation flag) |
+| `check <blocks>` | **accuracy test**, `fixed` only. For that many blocks the object also computes everything in float and compares the two. Then the right outlet sends `check <snr-db> <peak-error>`: signal-to-error ratio of fixed against float in dB, and the largest difference in sample values. Costs about as much again while it runs. |
+| `stats <blocks>` | **time measurement**. Averaged over that many blocks, the right outlet sends `stats <moving-fixed> <moving-float> <us-total> <us-inputs> <us-moving-prep> <us-moving-kernel> <us-static-kernel>`: per block, how many moving taps were computed in fixed and in float, then microseconds for the whole object, for writing the inputs into the delay lines, for preparing the moving taps, for the moving-tap computation and for the static-tap computation (the last three: fixed). Measured with the cycle counter on the ESP32, with the system clock elsewhere. |
+| `fixedshift <n>` | the accumulator shift of the PIE kernels (15; a test switch) |
 
 The help patch shows both diagnostics with labelled number boxes.
 
-Limits: delays from 1 sample to `<maxdelay-ms>`. In `q15`, the signals must stay within ±1 (they saturate). A tap that moves faster than 1/7 sample per sample (about 50 000 m/s for WFS: in practice only a jump with a very short ramp) takes the float path in that block.
+Limits: delays from 1 sample to `<maxdelay-ms>`. In `fixed`, the signals must stay within ±1 (they saturate). A tap whose delay changes faster than 1/7 sample per sample (a radial speed of c/7 ≈ 49 m/s; in WFS: a position jump with a short ramp) takes the scalar float path in that block; the SIMD float kernels have the same limit with AVX2 (8 lanes) and 1/3 with NEON (4 lanes). The limit is not a setting: it is where the kernels' window of 5 samples per lane stops being enough (see "Source layout").
 
 ## How it computes
 
 Per block of n samples:
 
-1. **Delay lines.** One ring buffer per input, a power of 2 long, in PSRAM (`getbytes`). The last n + 3 samples are mirrored in front of the ring. A block's reads are then contiguous, also where they cross the ring's end: the mirror runs on into the ring's start. In `q15` a second ring holds the inputs as int16.
+1. **Delay lines.** One ring buffer per input, a power of 2 long, in PSRAM (`getbytes`). The last n + 3 samples are mirrored in front of the ring. A block's reads are then contiguous, also where they cross the ring's end: the mirror runs on into the ring's start. In `fixed` a second ring holds the inputs as int16.
 2. **A tap that doesn't move in this block** is a 4-tap FIR over the delayed input: the 4-point coefficients for its fraction, times its gain. They are computed once when the tap changes and then cached. The result is added straight into its output.
 3. **A moving tap** ramps delay and gain per sample. Its read position is a 32.32 integer (exact for the float increment, without per-sample float→int conversion). Each block's delay and gain are computed from the ramp's start and end, not added up block by block.
-4. **`q15`**: the static taps of an output are summed by one PIE kernel (`tapmatrix_q15_sum`): 8 samples per vector, per tap and point one broadcast coefficient × one unaligned load × `esp.vmulas.s16.qacc`, all taps of the output in one accumulator, one saturating store. The moving taps of an output are summed by a second kernel (`tapmatrix_q15_moving`): per 8 samples it computes each lane's fraction q, the coefficients b = q + Q/2, c = (1−q) + P/2 − Q/2, a = −(P+Q)/6, d = −(2P−Q)/6 (P = q(1−q), Q = Pq), multiplies them by the gain ramp and accumulates them over a 5-point window. Lane masks pick points 0..3 or 1..4 where the read position steps by a sample within the 8. The C side only prepares, per 8 samples, a window pointer, the fraction offset and the gain. The lane offsets and the gain ramp stay the same for a whole ramp and are computed once, at its first block.
+4. **`fixed`**: the static taps of an output are summed by one PIE kernel (`tapmatrix_fixed_sum`): 8 samples per vector, per tap and point one broadcast coefficient × one unaligned load × `esp.vmulas.s16.qacc`, all taps of the output in one accumulator, one saturating store. The moving taps of an output are summed by a second kernel (`tapmatrix_fixed_moving`): per 8 samples it computes each lane's fraction q, the coefficients b = q + Q/2, c = (1−q) + P/2 − Q/2, a = −(P+Q)/6, d = −(2P−Q)/6 (P = q(1−q), Q = Pq), multiplies them by the gain ramp and accumulates them over a 5-point window. Lane masks pick points 0..3 or 1..4 where the read position steps by a sample within the 8. The C side only prepares, per 8 samples, a window pointer, the fraction offset and the gain. The lane offsets and the gain ramp stay the same for a whole ramp and are computed once, at its first block.
 
 ## Accuracy (2026-11-22)
 
 Host tests against Pd's own chain (`delwrite~` → `line~` → `delread4~` → `*~`) and against an ideal double-precision computation (sine + noise, delays 13–20 ms, ramps over 200–300 ms):
 
-| | Pd's chain vs ideal | `float` vs ideal | `q15` vs ideal (source at −6 dBFS) |
+| | Pd's chain vs ideal | `float` vs ideal | `fixed` vs ideal (source at −6 dBFS) |
 |---|---|---|---|
 | static tap | 111.6 dB | 111.6 dB (identical to Pd's chain: 145 dB) | 82.4 dB |
 | ramp 13.37 → 20.11 ms, gain 0.7 → 0.3 | 81.1 dB | 103.1 dB | 71.7 dB |
 | ramp 20.11 → 5.5 ms, gain 0.3 → 1 | 60.8 dB | 106.4 dB | 73.6 dB |
 
-While delay and gain ramp, the float engine is better than Pd's chain: `line~` adds its per-block step in float 150–225 times and drifts by up to ~0.02 samples. `q15` against `float` on the board (`check`, noise at −17 dBFS): static 77.3 dB, all taps moving 70–75 dB.
+With AVX2 (x86, FMA: one rounding per multiply-add) the two ramps give 103.5 and 105.1 dB, the static tap the same. While delay and gain ramp, the float engine is better than Pd's chain: `line~` adds its per-block step in float 150–225 times and drifts by up to ~0.02 samples. `fixed` against `float` on the board (`check`, noise at −17 dBFS): static 77.3 dB, all taps moving 70–75 dB.
 
 ## Speed (2026-11-22)
 
@@ -78,13 +78,22 @@ While delay and gain ramp, the float engine is better than Pd's chain: `line~` a
 | 4×16 with Pd objects (`delread4~`, `line~` ×2, `*~`, sums) | ~920 | |
 | `[tapmatrix~ 4 16]` float, static | 348 | 297 |
 | same, all 64 taps moving | 784 | 643 |
-| same, `q15`, static | 186 | 142 |
-| same, `q15`, all moving | | 269 |
+| same, `fixed`, static | 186 | 142 |
+| same, `fixed`, all moving | | 269 |
 | `[tapmatrix~ 8 32]` float, static | > 1333 | > 1333 |
-| `[tapmatrix~ 8 32]` `q15`, static | 569 | 363 |
-| `[tapmatrix~ 8 32]` `q15`, all 256 taps moving | | ~1000 (board load 0.92–0.96: at the limit) |
+| `[tapmatrix~ 8 32]` `fixed`, static | 569 | 363 |
+| `[tapmatrix~ 8 32]` `fixed`, all 256 taps moving | | ~1000 (board load 0.92–0.96: at the limit) |
 
 The PIE kernels alone: static 3.7 cycles per tap and sample, moving 11.2 (10.0 in 8-sample chunks without a step). The float FIR: ~37.
+
+**x86_64 with AVX2** (Intel i7-6800K, 3.4 GHz, Debian, gcc -O3, Pd 0.56-5; 2026-11-24). `[tapmatrix~ 8 32]` float, µs per 64-sample block from `stats`:
+
+| | without AVX2 (`-DTAPMATRIX_NO_AVX2`, gcc's own SSE2) | with AVX2 + FMA |
+|---|---|---|
+| static | 11.0 | 7.7 |
+| all 256 taps moving | 77.3 | 24.2 |
+
+The AVX2 kernels are chosen at run time (`__builtin_cpu_supports`): the binaries stay baseline x86 and run on CPUs without AVX2.
 
 **i.MX6ULL** (one Cortex-A7 at 792 MHz with NEON, Debian 10, Pd 0.56-2 built for it; 2026-11-22). CPU time of `pd -batch` per 10 s of audio, 48 kHz, 64-sample blocks; the WFS patches are the same bench patches (`c4x16` etc.) with Pd's objects:
 
@@ -115,8 +124,10 @@ The static FIR loop costs ~31 cycles per tap and sample in the generic build and
 ## Open
 
 - **8 × 32 with all taps moving** uses ~1000 µs of the 1333 µs block. With the board's other audio work that leaves no headroom. Per block: moving kernel ~183k cycles, C prep ~133k, inputs ~19k. The prep loop is about 35 instructions per 8 samples per tap. Merging it into the kernel is the next step.
-- **Other architectures.** The float engine runs everywhere. The `q15` C kernels are integer only: the natural choice for the ESP32-C3 (no FPU); not enabled or measured there. On the ESP32-S3, its `ee.*` SIMD would replace PIE (not ported).
-- **Q15 quality.** ~75 dB. Q31 data (two 16-bit passes) would double the kernels' share.
+- **Static taps on x86.** `fir4` adds each tap into the output buffer, so the buffer is read and written once per tap; summing all taps of an output in registers (as the PIE kernel does) would save that.
+- **Double precision.** A Pd64 build computes in `double` with the scalar kernels. SIMD for double exists on x86 (AVX2: 4 lanes) and arm64 (NEON: 2 lanes), not on armv7; not written yet (half the lanes of float, so at most half the gain).
+- **Other architectures.** The float engine runs everywhere. The `fixed` C kernels are integer only: the natural choice for the ESP32-C3 (no FPU); not enabled or measured there. On the ESP32-S3, its `ee.*` SIMD would replace PIE (not ported).
+- **Fixed-point quality.** ~75 dB (16-bit data). Q31 data (two 16-bit passes) would double the kernels' share.
 - **The WFS prefilter** (`biquad~` ×4, `lop~` per source, ~20 µs per source) stays in Pd objects.
 
 ## Source layout
@@ -126,12 +137,13 @@ The static FIR loop costs ~31 cycles per tap and sample in the generic build and
 | `tapmatrix~.c` | the object: state, messages, the block loop (which taps move, which engine) |
 | `arch/platform.h` | timer for `stats` and scratch memory: ESP32, Windows, POSIX |
 | `arch/scalar.h` | the portable kernels in `t_sample` (float or double): coefficients, static FIR, moving tap |
-| `arch/neon.h` | the same with NEON (armv7, arm64), single precision |
-| `arch/q15.h` | the `q15` engine: its data layout, the C kernels (hosts), the declarations of the PIE kernels, a moving tap's preparation |
-| `esp32/tapmatrix_pie.S` | the PIE kernels (ESP32-P4) |
+| `arch/neon.h` | the same with NEON (armv7, arm64), single precision, 4 lanes; explains the moving kernel |
+| `arch/avx2.h` | the same with AVX2 + FMA (x86), single precision, 8 lanes, chosen at run time |
+| `arch/fixed.h` | the `fixed` engine: its data layout, the C kernels (hosts), the declarations of the PIE kernels, a moving tap's preparation |
+| `arch/fixed_pie.S` | the PIE kernels (ESP32-P4), with a guide to the PIE instructions they use |
 | `tapmatrix~.pd`, `tapmatrix.*~.pd` | the abstraction fallback |
 
-The kernels are `static` functions in headers, so the build stays one translation unit. A new SIMD architecture is one more header like `arch/neon.h`, included in `tapmatrix~.c` and called where the NEON kernels are.
+The kernels are `static` functions in headers, so the build stays one translation unit. A new SIMD architecture is one more header like `arch/neon.h`, included in `tapmatrix~.c` and called where the NEON kernels are. The PIE kernels are assembly (no intrinsics for PIE in GCC); `arch/fixed.h` has the same arithmetic in C, which runs on hosts as the `fixed` engine's reference.
 
 ## Tests
 
@@ -140,7 +152,9 @@ and `rowl` must give bit-identical output to the same cells set by `tap`; `jump`
 against its model (a linear ramp as input, exact for the 4-point interpolation); `get` and `clear <in>`.
 `TM_PATH=<folder>` tests another `tapmatrix~`, e.g. the fallback alone (a folder with only the `.pd` files).
 
-`tests/` also runs two patches with [libpd](https://github.com/libpd/libpd) and loads the built external as Pd does: `tm.pd` (float engine) and `tmq.pd` (q15 engine, source at −6 dBFS). Each compares a static and a moving tap with Pd's own `delwrite~` → `line~` → `delread4~` → `*~` chain and with an ideal double-precision computation (`ana.py`, needs numpy).
+`tests/kerneltest.c` checks the SIMD float kernels of the build machine (NEON or AVX2) against the scalar ones, 20 000 random static and moving taps, also at the ends of the ring and at the kernels' |dd| limits; it needs only Pd's headers (`make -C tests kerneltest PDINCLUDEDIR=…`).
+
+`tests/` also runs two patches with [libpd](https://github.com/libpd/libpd) and loads the built external as Pd does: `tm.pd` (float engine) and `tmfixed.pd` (fixed engine, source at −6 dBFS). Each compares a static and a moving tap with Pd's own `delwrite~` → `line~` → `delread4~` → `*~` chain and with an ideal double-precision computation (`ana.py`, needs numpy).
 
 ```sh
 make PDINCLUDEDIR=/path/to/libpd/pure-data/src
@@ -153,7 +167,7 @@ make test PDINCLUDEDIR=/path/to/libpd/pure-data/src LIBPD_DIR=/path/to/libpd   #
 
 ## Origin: pdesp
 
-`tapmatrix~` was written for pdesp (Pure Data on the ESP32-P4), to run a Wave Field Synthesis renderer of 8 sources × 32 speakers on the chip. There it is linked into the firmware and has the `q15` engine with PIE SIMD kernels: `esp32/tapmatrix_pie.S`, built only for the ESP32-P4 (on desktop systems the `q15` engine uses the same arithmetic in C, for testing). pdesp keeps a copy of `tapmatrix~.c` (`components/pd_objects/tapmatrix_tilde.c`): change both together. Since the split into `arch/`, the copy needs the `arch/` headers next to it (or this repository as a component).
+`tapmatrix~` was written for pdesp (Pure Data on the ESP32-P4), to run a Wave Field Synthesis renderer of 8 sources × 32 speakers on the chip. There it is linked into the firmware and has the `fixed` engine with PIE SIMD kernels: `arch/fixed_pie.S`, built only for the ESP32-P4 (on desktop systems the `fixed` engine uses the same arithmetic in C, for testing). pdesp keeps a copy of `tapmatrix~.c` (`components/pd_objects/tapmatrix_tilde.c`): change both together. Since the split into `arch/`, the copy needs the `arch/` headers next to it (or this repository as a component).
 
 ## License
 

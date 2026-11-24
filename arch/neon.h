@@ -3,6 +3,27 @@
  * scalar.h up to float rounding. Single precision only: with PD_FLOATSIZE=64
  * TAPMATRIX_NEON is 0 and the scalar kernels run.
  *   fir4_neon(), moving_neon()   n a multiple of 4; moving_neon: |dd| < 1/3
+ *
+ * Reading the intrinsics: float32x4_t / uint32x4_t hold 4 lanes. vld1q_f32(p)
+ * loads p[0..3] (any alignment), vst1q_f32 stores, vdupq_n_f32(v) copies v to
+ * all lanes. vaddq/vsubq/vmulq: lane-wise + - *; vmlaq_f32(a, b, c) = a + b*c,
+ * vmlsq_f32(a, b, c) = a - b*c. vcgtq_u32 / vcltq_u32: unsigned compare, all
+ * ones where true. vbslq_f32(m, x, y): x where m is set, else y. vmvnq_u32:
+ * bitwise not. vcvtq_f32_u32: integer -> float; vshrq_n_u32(v, 8): v >> 8.
+ *
+ * How the moving kernel works (arch/avx2.h does the same with 8 lanes, the
+ * fixed engine's PIE kernel too): lane i computes output sample i. Its read
+ * position is t_i = t_0 + i * (1 - dd) samples (32.32 fixed point, as in
+ * moving()). Within 4 samples the integer part of t_i - i changes by at most
+ * one when 3 |dd| < 1, so every lane finds its 4 interpolation points in a
+ * window of 5 consecutive samples starting at ring[X + i]: points 0..3 (lanes
+ * "L") or points 1..4 (the others). Five loads at X, X+1, .., X+4 give all
+ * four windows at once (lane i of load k is ring[X + i + k]); a per-lane mask
+ * picks points 0..3 or 1..4. Which lanes are which: the lane's fraction
+ * f_i = f_0 + i * step (32-bit, wrapping) wrapped around past f_0 exactly
+ * when the lane crossed a sample boundary. The limit on |dd| follows from the
+ * window: a faster ramp would need more than 5 points per lane; such a block
+ * takes the scalar kernel.
  */
 #ifndef TAPMATRIX_NEON_H
 #define TAPMATRIX_NEON_H
