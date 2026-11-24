@@ -10,6 +10,7 @@
   turning point, gains fade in over xfade. A row sent during the fade-out sets the targets after it.
 * get: after a ramp the current values equal the targets.
 * clear <in>: only that input's row goes silent.
+* first-out: row and jump with a first output set the cells from there on (and jump keeps the others).
 """
 
 from __future__ import annotations
@@ -295,9 +296,45 @@ def test_get_clear():
     return ok_get and ok_clear
 
 
+def test_first():
+    """row ... 2 and jump ... 1 (first-out) = the same cells set with tap"""
+    p = P()
+    sn = source(p)
+    tms = []
+    for k in range(2):
+        t = p.obj("tapmatrix~ 2 4 100")
+        p.c(sn, 0, t, 0)
+        r = p.obj(f"r ctl{k}")
+        p.c(r, 0, t, 0)
+        tms.append(t)
+    for a in ("d", "g", "d2", "g2"):
+        p.obj(f"array define {a} 2")
+    sched = [(10, "; d 0 3.3 7.25; g 0 0.5 -0.2; ctl1 row 0 0 d g 2"
+                  "; ctl0 tap 0 2 3.3 0.5 0; ctl0 tap 0 3 7.25 -0.2 0"),
+             (100, "; d2 0 12 1.5; g2 0 0.9 0.3; ctl1 jump 0 20 d2 g2 1"
+                   "; ctl0 tap 0 1 12 0.9 0; ctl0 tap 0 2 1.5 0.3 0")]
+    sns = [p.obj("snake~ out 4") for _ in range(2)]
+    for t, s in zip(tms, sns):
+        p.c(t, 0, s, 0)
+
+    def conn(tws):
+        for k in range(2):
+            for o in range(4):
+                p.c(sns[k], o, tws[4 * k + o], 0)
+    x, out = run(p, "first", 8, 12000, sched, conn)
+    errs = errors(out)
+    a, b = x[:, 0:4], x[:, 4:8]
+    pre = slice(int(0.03 * SR), int(0.09 * SR))   # after the row, before the jump
+    post = slice(int(0.16 * SR), None)            # after the jump's fade-in
+    d_pre, d_post = np.abs(a[pre] - b[pre]).max(), np.abs(a[post] - b[post]).max()
+    ok = d_pre < 1e-6 and d_post < 1e-6 and np.abs(b[pre, 2:]).max() > 0.1 and np.abs(b[post, 1:]).max() > 0.1
+    print(f"{'PASS' if ok else 'FAIL'} first-out: max |row/jump - tap| {d_pre:.2e} / {d_post:.2e}", errs[:2])
+    return ok
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
-    ok = test_row() & test_jump() & test_get_clear()
+    ok = test_row() & test_jump() & test_get_clear() & test_first()
     sys.exit(0 if ok else 1)
 
 
