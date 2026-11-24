@@ -1,12 +1,14 @@
 /*
- * [tapmatrix~ [-float|-fixed] <ins> <outs> <maxdelay-ms> [ramp-ms]]
+ * [tapmatrix~ [-float|-fixed] [-oversample] <ins> <outs> <maxdelay-ms> [ramp-ms]]
  *
  * A matrix of fractional delays: every input -> output cell is a tap with its
  * own delay and gain. Input: one multichannel signal (<ins> channels, missing
  * ones are silent). Output: one multichannel signal of <outs> channels, each
  * the sum of its taps. For WFS (sources x speakers), multi-tap delays, delay
  * panning and matrix mixing. Delay read with Pd's 4-point interpolation
- * (as delread4~). Design, measurements and decisions: README.md here.
+ * (as delread4~), optionally on the delay line oversampled 2x (-oversample:
+ * flat up to 20 kHz, float engine only, delays from TAPMATRIX_OS_K + 1 samples).
+ * Design, measurements and decisions: README.md here.
  *
  * Messages (left inlet):
  *   tap <in> <out> <delay-ms> <gain> [ramp-ms]   set a cell; delay and gain ramp
@@ -68,6 +70,7 @@
 #include "arch/fixed.h"
 
 static t_class *tapmatrix_class;
+static t_sample tm_hb[TAPMATRIX_OS_K];      /* the halfband's taps (-oversample) */
 
 typedef struct {
     t_sample d, g;                  /* now: delay in samples, gain */
@@ -91,6 +94,8 @@ typedef struct _tapmatrix {
     int x_len, x_mask, x_mir;       /* ring: length (power of 2), mirror n+3 */
     int x_w;                        /* logical write position */
     t_sample *x_ring;               /* [ins][mir + len] */
+    int x_os;                       /* -oversample */
+    t_sample *x_oring;              /* [ins][mir + len], -oversample: the half-sample values */
     t_tap *x_tap;                   /* [outs][ins] */
     int *x_jleft;                   /* [ins] jump: blocks to the dip's turning point + 1, 0 = none */
     int *x_jxb;                     /* [ins] jump: fade length in blocks */
@@ -118,6 +123,8 @@ typedef struct _tapmatrix {
 static void tapmatrix_freebuf(t_tapmatrix *x)
 {
     if (x->x_ring) freebytes(x->x_ring, x->x_ins * (x->x_mir + x->x_len) * sizeof(t_sample));
+    if (x->x_oring) freebytes(x->x_oring, x->x_ins * (x->x_mir + x->x_len) * sizeof(t_sample));
+    x->x_oring = 0;
     if (x->x_qring) freebytes(x->x_qring, x->x_ins * (x->x_mir + x->x_len) * sizeof(int16_t));
     if (x->x_qmem) fastfree(x->x_qmem, 2 * x->x_n * sizeof(int16_t) + 32);
     if (x->x_mvmem) fastfree(x->x_mvmem, x->x_ins * sizeof(t_mvtap) + 16);
@@ -138,27 +145,35 @@ static void tapmatrix_allocq(t_tapmatrix *x)
     x->x_fcheck = (t_sample *)getbytes(x->x_n * sizeof(t_sample));
 }
 
+static t_sample clampd(t_tapmatrix *x, t_sample d)
+{
+    const t_sample lo = x->x_os ? TAPMATRIX_OS_K + 1 : 1, hi = x->x_len - x->x_n - 4;
+    return (d < lo ? lo : d > hi ? hi : d);
+}
+
 /* (re)make the buffers for block length n */
 static void tapmatrix_alloc(t_tapmatrix *x, int n, t_float sr)
 {
-    int need = (int)(x->x_maxms * 0.001f * sr) + n + 8, len = 64;
+    int need = (int)(x->x_maxms * 0.001f * sr) + n + 8 + (x->x_os ? 2 * TAPMATRIX_OS_K : 0), len = 64;
     while (len < need) len <<= 1;
     if (x->x_ring && x->x_n == n && x->x_len == len) return;
     tapmatrix_freebuf(x);
     x->x_n = n;
     x->x_len = len;
     x->x_mask = len - 1;
-    x->x_mir = n + 3;
+    x->x_mir = n + 3 + (x->x_os ? 2 * TAPMATRIX_OS_K : 0);    /* + the halfband's history */
     x->x_w = 0;
     for (int i = 0; i < x->x_ins * x->x_outs; i++) x->x_tap[i].q.mv = 0;
     x->x_ring = (t_sample *)getbytes(x->x_ins * (x->x_mir + len) * sizeof(t_sample));
+    if (x->x_os) x->x_oring = (t_sample *)getbytes(x->x_ins * (x->x_mir + len) * sizeof(t_sample));
     tapmatrix_allocq(x);
-}
-
-static t_sample clampd(t_tapmatrix *x, t_sample d)
-{
-    t_sample hi = x->x_len - x->x_n - 4;
-    return (d < 1 ? 1 : d > hi ? hi : d);
+    /* delays set before the first DSP run were not clamped (no block length yet) */
+    for (int i = 0; i < x->x_ins * x->x_outs; i++) {
+        t_tap *t = &x->x_tap[i];
+        t->d = clampd(x, t->d), t->dto = clampd(x, t->dto), t->dfrom = clampd(x, t->dfrom);
+        t->pd = clampd(x, t->pd);
+        t->hvalid = 0;
+    }
 }
 
 /* delay ms -> samples, as delread4~ computes it */
@@ -337,6 +352,10 @@ static void tapmatrix_engine(t_tapmatrix *x, t_symbol *s)
             pd_error(x, "tapmatrix~: no fixed engine on this platform");
             return;
         }
+        if (x->x_os) {
+            pd_error(x, "tapmatrix~: -oversample: float engine only");
+            return;
+        }
         x->x_fixed = 1;
         tapmatrix_allocq(x);
         for (int i = 0; i < x->x_ins * x->x_outs; i++) x->x_tap[i].q.mv = 0;
@@ -427,11 +446,21 @@ static t_int *tapmatrix_perform(t_int *w)
         if (src) memcpy(r, src, n * sizeof(t_sample));
         else memset(r, 0, n * sizeof(t_sample));
         if (q) fixed_from(r, q, n);
+        t_sample *o = x->x_os ? x->x_oring + c * stride + mir + wpos : 0;
+        if (o) {
+#if TAPMATRIX_AVX2
+            if (tm_avx2 && !(n & 7)) halfband_avx2(r, tm_hb, TAPMATRIX_OS_K, o, n);
+            else
+#endif
+            halfband(r, tm_hb, TAPMATRIX_OS_K, o, n);
+        }     /* reads the history: the mirror near wpos 0 */
         const int m0 = len - mir;               /* mirror [m0, len) to [0, mir) */
         if (wpos + n > m0) {
             const int from = wpos > m0 ? wpos : m0;
             memcpy(x->x_ring + c * stride + (from - m0), x->x_ring + c * stride + mir + from,
                    (wpos + n - from) * sizeof(t_sample));
+            if (o) memcpy(x->x_oring + c * stride + (from - m0), x->x_oring + c * stride + mir + from,
+                          (wpos + n - from) * sizeof(t_sample));
             if (q) memcpy(x->x_qring + c * stride + (from - m0), x->x_qring + c * stride + mir + from,
                           (wpos + n - from) * sizeof(int16_t));
         }
@@ -467,6 +496,20 @@ static t_int *tapmatrix_perform(t_int *w)
                     n_mq++;
                     c_prep += CYCLES() - cp;
                     if (x->x_check) moving(r + mir, mask, wpos, d0, dd, g0, gd, x->x_fcheck, n);
+                } else if (x->x_os) {
+                    const t_sample *orr = x->x_oring + c * stride + mir;
+#if TAPMATRIX_AVX2
+                    if (tm_avx2 && !(n & 7) && tm_fabs(dd) < TMK(1.0 / 14))
+                        moving_os_avx2(r + mir, orr, mask, len, TAPMATRIX_OS_K, wpos, d0, dd, g0, gd, y, n);
+                    else
+#endif
+#if TAPMATRIX_NEON
+                    if (!(n & 3) && tm_fabs(dd) < TMK(1.0 / 6))
+                        moving_os_neon(r + mir, orr, mask, len, TAPMATRIX_OS_K, wpos, d0, dd, g0, gd, y, n);
+                    else
+#endif
+                    moving_os(r + mir, orr, mask, TAPMATRIX_OS_K, wpos, d0, dd, g0, gd, y, n);
+                    n_mf++;
                 } else {
                     t->q.mv = 0;
 #if TAPMATRIX_AVX2
@@ -485,6 +528,33 @@ static t_int *tapmatrix_perform(t_int *w)
                 continue;
             }
             if (t->g == 0) continue;
+            if (x->x_os) {          /* static on the 2x line u: d2 = 2d samples of u */
+                const t_sample d2 = 2 * t->d;
+                const int di2 = (int)d2;
+                if (!t->hvalid) {
+                    coeffs(d2 - di2, t->g, t->h);
+                    t->hvalid = 1;
+                }
+                /* the newest point u[2e - di2 + 1] (e = w + i): even -> the input ring,
+                   odd -> the half-samples; the next older point is in the other ring */
+                const t_sample *xr = r + mir, *orr = x->x_oring + c * stride + mir;
+                const int ix = (di2 & 1) ? wpos - (di2 - 1) / 2 : wpos - di2 / 2;
+                const int io = (di2 & 1) ? wpos - (di2 + 1) / 2 + TAPMATRIX_OS_K : wpos - di2 / 2 + TAPMATRIX_OS_K;
+                int ax = ix & mask, ao = io & mask;
+                if (ax + n > len) ax -= len;
+                if (ao + n > len) ao -= len;
+                const t_sample *p = (di2 & 1) ? xr + ax : orr + ao, *qq = (di2 & 1) ? orr + ao : xr + ax;
+#if TAPMATRIX_AVX2
+                if (tm_avx2 && !(n & 7)) fir2x2_avx2(p, qq, t->h, y, n);
+                else
+#endif
+#if TAPMATRIX_NEON
+                if (!(n & 3)) fir2x2_neon(p, qq, t->h, y, n);
+                else
+#endif
+                fir2x2(p, qq, t->h, y, n);
+                continue;
+            }
             /* static: a = x[e - di + 1] for the block's newest e = w + i */
             const int di = (int)t->d;
             const t_sample frac = t->d - di;
@@ -566,15 +636,20 @@ static void *tapmatrix_new(t_symbol *s, int argc, t_atom *argv)
 {
     t_tapmatrix *x = (t_tapmatrix *)pd_new(tapmatrix_class);
     (void)s;
-    /* flags first: -float (the default) or -fixed */
+    /* flags first: -float (the default) or -fixed; -oversample */
     while (argc && argv->a_type == A_SYMBOL && argv->a_w.w_symbol->s_name[0] == '-') {
         const t_symbol *f = argv->a_w.w_symbol;
         if (f == gensym("-fixed")) {
             if (TAPMATRIX_FIXED) x->x_fixed = 1;
             else pd_error(x, "tapmatrix~: no fixed engine on this platform: float");
         } else if (f == gensym("-float")) x->x_fixed = 0;
+        else if (f == gensym("-oversample")) x->x_os = 1;
         else pd_error(x, "tapmatrix~: unknown flag %s", f->s_name);
         argc--, argv++;
+    }
+    if (x->x_os && x->x_fixed) {
+        pd_error(x, "tapmatrix~: -oversample: float engine only");
+        x->x_fixed = 0;
     }
     x->x_ins = atom_getfloatarg(0, argc, argv);
     x->x_outs = atom_getfloatarg(1, argc, argv);
@@ -613,6 +688,7 @@ static void tapmatrix_free(t_tapmatrix *x)
 void tapmatrix_tilde_setup(void)
 {
     tm_avx2_init();
+    halfband_coeffs(tm_hb, TAPMATRIX_OS_K, TAPMATRIX_OS_BETA);
     tapmatrix_class = class_new(gensym("tapmatrix~"), (t_newmethod)tapmatrix_new,
         (t_method)tapmatrix_free, sizeof(t_tapmatrix), CLASS_MULTICHANNEL, A_GIMME, 0);
     CLASS_MAINSIGNALIN(tapmatrix_class, t_tapmatrix, x_f);

@@ -1,6 +1,6 @@
 # tapmatrix~: a matrix of fractional delays for Pd
 
-`[tapmatrix~ [-float|-fixed] <ins> <outs> <maxdelay-ms> [ramp-ms]]` takes one multichannel signal with `<ins>` channels and gives one with `<outs>` channels. Every input → output cell is a tap with its own delay and gain. Each output is the sum of its taps. Delays are read with Pd's 4-point interpolation, the same as `delread4~`.
+`[tapmatrix~ [-float|-fixed] [-oversample] <ins> <outs> <maxdelay-ms> [ramp-ms]]` takes one multichannel signal with `<ins>` channels and gives one with `<outs>` channels. Every input → output cell is a tap with its own delay and gain. Each output is the sum of its taps. Delays are read with Pd's 4-point interpolation, the same as `delread4~`.
 
 What it is for: Wave Field Synthesis (sources × speakers), multi-tap delays, delay-based panning, matrix mixing with delays. It replaces, per cell, the chain `delwrite~` → `line~` → `delread4~` → `line~` → `*~` → `+~`: in float 2.5× faster than that chain, and more accurate while delays ramp.
 
@@ -24,10 +24,11 @@ The build uses [pd-lib-builder](https://github.com/pure-data/pd-lib-builder) (a 
 
 ## Creation and messages
 
-`[tapmatrix~ [-float|-fixed] <ins> <outs> <maxdelay-ms> [ramp-ms]]`
+`[tapmatrix~ [-float|-fixed] [-oversample] <ins> <outs> <maxdelay-ms> [ramp-ms]]`
 
 - `-float` (the default): computes in Pd's sample type (32-bit float; `double` in a Pd64 build).
 - `-fixed`: computes in 16-bit fixed point. On the ESP32-P4 with its PIE SIMD unit, several times faster than float; on other platforms the same arithmetic in plain C, slow, for testing only. Signals must stay within ±1.
+- `-oversample`: reads the delay lines as if they were sampled at twice the rate (a halfband interpolator of 48 taps per input, then the same 4-point interpolation). The 4-point interpolation alone loses up to 8.4 dB at 20 kHz (48 kHz, fraction 0.5) and modulates the level of high frequencies while a delay moves; with `-oversample` it is within 0.53 dB up to 20 kHz. Float engine only. Delays start at 25 samples instead of 1 (the interpolator's half length); the delays themselves stay exact, no latency is added. Costs per input, not per tap: +40–65 % for `[tapmatrix~ 8 32]` (see Speed). The abstraction fallback has no flags.
 - `<ins>`, `<outs>`: channels of the input and output signal. `<maxdelay-ms>`: the longest delay. `[ramp-ms]`: default ramp time (20 ms).
 
 | message | what |
@@ -55,7 +56,8 @@ Per block of n samples:
 1. **Delay lines.** One ring buffer per input, a power of 2 long, in PSRAM (`getbytes`). The last n + 3 samples are mirrored in front of the ring. A block's reads are then contiguous, also where they cross the ring's end: the mirror runs on into the ring's start. In `fixed` a second ring holds the inputs as int16.
 2. **A tap that doesn't move in this block** is a 4-tap FIR over the delayed input: the 4-point coefficients for its fraction, times its gain. They are computed once when the tap changes and then cached. The result is added straight into its output.
 3. **A moving tap** ramps delay and gain per sample. Its read position is a 32.32 integer (exact for the float increment, without per-sample float→int conversion). Each block's delay and gain are computed from the ramp's start and end, not added up block by block.
-4. **`fixed`**: the static taps of an output are summed by one PIE kernel (`tapmatrix_fixed_sum`): 8 samples per vector, per tap and point one broadcast coefficient × one unaligned load × `esp.vmulas.s16.qacc`, all taps of the output in one accumulator, one saturating store. The moving taps of an output are summed by a second kernel (`tapmatrix_fixed_moving`): per 8 samples it computes each lane's fraction q, the coefficients b = q + Q/2, c = (1−q) + P/2 − Q/2, a = −(P+Q)/6, d = −(2P−Q)/6 (P = q(1−q), Q = Pq), multiplies them by the gain ramp and accumulates them over a 5-point window. Lane masks pick points 0..3 or 1..4 where the read position steps by a sample within the 8. The C side only prepares, per 8 samples, a window pointer, the fraction offset and the gain. The lane offsets and the gain ramp stay the same for a whole ramp and are computed once, at its first block.
+4. **`-oversample`.** A second ring per input holds the half-sample values, computed when the input arrives by a Kaiser-windowed halfband (2 × 24 taps, β = 9: passband error and images below −91 dB up to 20 kHz at 48 kHz; `TAPMATRIX_OS_K` at compile time sets the half length). The 2× signal u is then u[2k] = x[k] (the input ring) and u[2k+1] = the half-sample ring, and the 4-point interpolation reads u. A static tap's 4 points alternate between the two rings, so it is two 2-tap FIRs on contiguous memory (`fir2x2`); a moving tap's window points of all lanes are, per point, consecutive values of one ring, so the SIMD moving kernels work as before with 2·dd (limit |dd| < 1/14 with AVX2, 1/6 with NEON).
+5. **`fixed`**: the static taps of an output are summed by one PIE kernel (`tapmatrix_fixed_sum`): 8 samples per vector, per tap and point one broadcast coefficient × one unaligned load × `esp.vmulas.s16.qacc`, all taps of the output in one accumulator, one saturating store. The moving taps of an output are summed by a second kernel (`tapmatrix_fixed_moving`): per 8 samples it computes each lane's fraction q, the coefficients b = q + Q/2, c = (1−q) + P/2 − Q/2, a = −(P+Q)/6, d = −(2P−Q)/6 (P = q(1−q), Q = Pq), multiplies them by the gain ramp and accumulates them over a 5-point window. Lane masks pick points 0..3 or 1..4 where the read position steps by a sample within the 8. The C side only prepares, per 8 samples, a window pointer, the fraction offset and the gain. The lane offsets and the gain ramp stay the same for a whole ramp and are computed once, at its first block.
 
 ## Accuracy (2026-11-22)
 
@@ -66,6 +68,14 @@ Host tests against Pd's own chain (`delwrite~` → `line~` → `delread4~` → `
 | static tap | 111.6 dB | 111.6 dB (identical to Pd's chain: 145 dB) | 82.4 dB |
 | ramp 13.37 → 20.11 ms, gain 0.7 → 0.3 | 81.1 dB | 103.1 dB | 71.7 dB |
 | ramp 20.11 → 5.5 ms, gain 0.3 → 1 | 60.8 dB | 106.4 dB | 73.6 dB |
+
+`-oversample` against the plain 4-point interpolation (`tests/ostest.py`, a static tap's frequency response from its impulse response; a moving tap: a 15 kHz sine through a delay ramp of 20 samples):
+
+| | plain | `-oversample` |
+|---|---|---|
+| static, fraction 0.5: 12 / 16 / 20 kHz | −1.07 / −3.25 / −8.42 dB | 0.00 / 0.00 / 0.00 dB |
+| static, fraction 0.25: 12 / 16 / 20 kHz | −0.73 / −1.97 / −3.84 dB | −0.07 / −0.23 / −0.53 dB |
+| 15 kHz while the delay moves: level ripple (mean) | 2.46 dB (−1.45 dB) | 0.17 dB (−0.11 dB) |
 
 With AVX2 (x86, FMA: one rounding per multiply-add) the two ramps give 103.5 and 105.1 dB, the static tap the same. While delay and gain ramp, the float engine is better than Pd's chain: `line~` adds its per-block step in float 150–225 times and drifts by up to ~0.02 samples. `fixed` against `float` on the board (`check`, noise at −17 dBFS): static 77.3 dB, all taps moving 70–75 dB.
 
@@ -92,6 +102,8 @@ The PIE kernels alone: static 3.7 cycles per tap and sample, moving 11.2 (10.0 i
 |---|---|---|
 | static | 11.0 | 7.7 |
 | all 256 taps moving | 77.3 | 24.2 |
+
+With `-oversample` (best of 3; the halfband for the 8 inputs takes 2.4 µs): static 6.8 → 11.1 µs, all moving 24.4 → 33.4 µs.
 
 The AVX2 kernels are chosen at run time (`__builtin_cpu_supports`): the binaries stay baseline x86 and run on CPUs without AVX2.
 
@@ -136,7 +148,7 @@ The static FIR loop costs ~31 cycles per tap and sample in the generic build and
 |---|---|
 | `tapmatrix~.c` | the object: state, messages, the block loop (which taps move, which engine) |
 | `arch/platform.h` | timer for `stats` and scratch memory: ESP32, Windows, POSIX |
-| `arch/scalar.h` | the portable kernels in `t_sample` (float or double): coefficients, static FIR, moving tap |
+| `arch/scalar.h` | the portable kernels in `t_sample` (float or double): coefficients, static FIR, moving tap; `-oversample`: the halfband, `fir2x2`, `moving_os` |
 | `arch/neon.h` | the same with NEON (armv7, arm64), single precision, 4 lanes; explains the moving kernel |
 | `arch/avx2.h` | the same with AVX2 + FMA (x86), single precision, 8 lanes, chosen at run time |
 | `arch/fixed.h` | the `fixed` engine: its data layout, the C kernels (hosts), the declarations of the PIE kernels, a moving tap's preparation |
@@ -151,6 +163,8 @@ The kernels are `static` functions in headers, so the build stays one translatio
 and `rowl` must give bit-identical output to the same cells set by `tap`; `jump` is checked sample by sample
 against its model (a linear ramp as input, exact for the 4-point interpolation); `get` and `clear <in>`.
 `TM_PATH=<folder>` tests another `tapmatrix~`, e.g. the fallback alone (a folder with only the `.pd` files).
+
+`tests/ostest.py` (Pd batch, like `msgtest.py`; the external only): `-oversample` against the plain interpolation, frequency responses and the delay of static taps, the level of a 15 kHz sine in a moving tap.
 
 `tests/kerneltest.c` checks the SIMD float kernels of the build machine (NEON or AVX2) against the scalar ones, 20 000 random static and moving taps, also at the ends of the ring and at the kernels' |dd| limits; it needs only Pd's headers (`make -C tests kerneltest PDINCLUDEDIR=…`).
 

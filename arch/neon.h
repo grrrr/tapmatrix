@@ -2,7 +2,8 @@
  * 4 output samples per vector. The same results as fir4() and moving() in
  * scalar.h up to float rounding. Single precision only: with PD_FLOATSIZE=64
  * TAPMATRIX_NEON is 0 and the scalar kernels run.
- *   fir4_neon(), moving_neon()   n a multiple of 4; moving_neon: |dd| < 1/3
+ *   fir4_neon(), fir2x2_neon(), moving_neon()   n a multiple of 4; moving_neon: |dd| < 1/3
+ *   moving_os_neon()                            -oversample; |dd| < 1/6
  *
  * Reading the intrinsics: float32x4_t / uint32x4_t hold 4 lanes. vld1q_f32(p)
  * loads p[0..3] (any alignment), vst1q_f32 stores, vdupq_n_f32(v) copies v to
@@ -46,6 +47,21 @@ static void fir4_neon(const float *x, const float h[4], float *out, int n)
     }
 }
 
+/* a static tap on the 2x-oversampled line (scalar.h: fir2x2), 4 at a time */
+static void fir2x2_neon(const float *p, const float *q, const float h[4], float *out, int n)
+{
+    const float32x4_t h0 = vdupq_n_f32(h[0]), h1 = vdupq_n_f32(h[1]),
+        h2 = vdupq_n_f32(h[2]), h3 = vdupq_n_f32(h[3]);
+    for (int i = 0; i < n; i += 4) {
+        float32x4_t acc = vld1q_f32(out + i);
+        acc = vmlaq_f32(acc, h0, vld1q_f32(p + i));
+        acc = vmlaq_f32(acc, h1, vld1q_f32(q + i));
+        acc = vmlaq_f32(acc, h2, vld1q_f32(p + i - 1));
+        acc = vmlaq_f32(acc, h3, vld1q_f32(q + i - 1));
+        vst1q_f32(out + i, acc);
+    }
+}
+
 /* A moving tap, 4 samples per vector. Lane i of a chunk reads a 5-point
    window ring[X + i .. X + i + 4]; lanes in L use points 0..3 (d c b a), the
    others 1..4: within 4 samples the read position steps by at most one
@@ -81,6 +97,51 @@ static void moving_neon(const float *ring, int mask, int len, int w, float d0, f
         const float32x4_t fp = vmulq_f32(vcvtq_f32_u32(vshrq_n_u32(f, 8)), tofrac);
         const float32x4_t frac = vsubq_f32(one, fp), cb = vsubq_f32(c, b);
         /* y = b + frac*(cb - (1/6) fp ((d - a - 3cb) frac + (d + 2a - 3b))), as delread4~ */
+        float32x4_t t1 = vmlaq_f32(vsubq_f32(d, a), vnegq_f32(three), cb);
+        float32x4_t t2 = vmlsq_f32(vmlaq_f32(d, two, a), three, b);
+        float32x4_t t = vmlaq_f32(t2, t1, frac);
+        t = vmlsq_f32(cb, vmulq_f32(sixth, fp), t);
+        const float32x4_t y = vmlaq_f32(b, frac, t);
+        const float32x4_t gv = vaddq_f32(vdupq_n_f32(g), rg);
+        vst1q_f32(out + i, vmlaq_f32(vld1q_f32(out + i), y, gv));
+    }
+}
+/* a moving tap on the 2x line (scalar.h: moving_os), 4 samples per vector: as
+   moving_neon() with the read position in u's samples; window point k of all
+   lanes is 4 consecutive values of one ring (x or the half-samples o).
+   Needs |2 dd| < 1/3. */
+static void moving_os_neon(const float *x, const float *o, int mask, int len, int K, int w,
+                           float d0, float dd, float g0, float gd, float *out, int n)
+{
+    uint64_t T = ((uint64_t)(uint32_t)(2 * w) << 32) - (uint64_t)fix32(2 * d0);
+    const uint64_t inc = (2ull << 32) - (uint64_t)fix32(2 * dd), inc4 = inc * 4;
+    const uint32_t step = (uint32_t)inc;
+    const int up = dd < 0;
+    const uint32_t off = up ? 1 : 2;
+    const uint32_t lo[4] = { 0, step, 2 * step, 3 * step };
+    const uint32x4_t offs = vld1q_u32(lo);
+    const float gl[4] = { 0, gd, 2 * gd, 3 * gd };
+    const float32x4_t rg = vld1q_f32(gl), sixth = vdupq_n_f32(1.f / 6.f),
+        one = vdupq_n_f32(1.f), two = vdupq_n_f32(2.f), three = vdupq_n_f32(3.f),
+        tofrac = vdupq_n_f32(1.f / 16777216.f);
+    float g = g0;
+    for (int i = 0; i < n; i += 4, T += inc4, g += 4 * gd) {
+        const uint32_t J = (uint32_t)(T >> 32), F0 = (uint32_t)T, X = J - off;
+        float32x4_t wk[5];
+        for (int k = 0; k < 5; k++) {
+            const uint32_t m = X + k;
+            const float *r = (m & 1) ? o : x;
+            int s = (int)(((m >> 1) + ((m & 1) ? (uint32_t)K : 0)) & (uint32_t)mask);
+            if (s + 4 > len) s -= len;
+            wk[k] = vld1q_f32(r + s);
+        }
+        const uint32x4_t f = vaddq_u32(vdupq_n_u32(F0), offs);
+        const uint32x4_t wrapped = up ? vcltq_u32(f, vdupq_n_u32(F0)) : vcgtq_u32(f, vdupq_n_u32(F0));
+        const uint32x4_t L = up ? vmvnq_u32(wrapped) : wrapped;
+        const float32x4_t d = vbslq_f32(L, wk[0], wk[1]), c = vbslq_f32(L, wk[1], wk[2]),
+            b = vbslq_f32(L, wk[2], wk[3]), a = vbslq_f32(L, wk[3], wk[4]);
+        const float32x4_t fp = vmulq_f32(vcvtq_f32_u32(vshrq_n_u32(f, 8)), tofrac);
+        const float32x4_t frac = vsubq_f32(one, fp), cb = vsubq_f32(c, b);
         float32x4_t t1 = vmlaq_f32(vsubq_f32(d, a), vnegq_f32(three), cb);
         float32x4_t t2 = vmlsq_f32(vmlaq_f32(d, two, a), three, b);
         float32x4_t t = vmlaq_f32(t2, t1, frac);
