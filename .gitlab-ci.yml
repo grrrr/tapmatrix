@@ -157,3 +157,15 @@ deploy:
     - chmod 600 ~/.config/deken/config
   script:
     - deken upload dek/*.dek
+
+push_github:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+  image: $CI_REGISTRY/docker/push_github
+  tags:
+    - docker
+    - default
+  script:
+    - echo "Pushing to github"
+
