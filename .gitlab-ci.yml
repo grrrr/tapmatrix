@@ -158,7 +158,6 @@ package:
   script:
     - VERSION="${CI_COMMIT_TAG#v}"; VERSION="${VERSION:-0.0.0-$CI_COMMIT_SHORT_SHA}"
     - mkdir -p bin/tapmatrix~ src/tapmatrix~ dek
-    - ls out/*
     - cp out/* README.md LICENSE.txt tapmatrix*.pd bin/tapmatrix~/
     - cp tapmatrix~.c Makefile tapmatrix*.pd README.md LICENSE.txt src/tapmatrix~/ && cp -r arch tests src/tapmatrix~/
     - (cd bin && deken package --version "$VERSION" tapmatrix~ && mv *.dek* ../dek/)
