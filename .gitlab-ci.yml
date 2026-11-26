@@ -114,7 +114,7 @@ windows-amd64-64:
   script:
     - *pd_headers
     - make PDINCLUDEDIR=$PDINCLUDEDIR extension=$EXT arch="$MACOS_ARCHS"
-    - mkdir -p out && cp $EXT out/
+    - mkdir -p out && cp *.$EXT out/
 
 macos-32:
   extends: .macos-fat
