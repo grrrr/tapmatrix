@@ -72,11 +72,12 @@ linux-arm64-64:
 
 linux-armv7-32:
   extends: .linux
-  variables: { PACKAGES: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross", EXT: "linux-arm-32.so", MAKEFLAGS_EXTRA: "PLATFORM=arm-linux-gnueabihf floatsize=32" }
+  variables: { PACKAGES: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross", EXT: "linux-armv7-32.so", MAKEFLAGS_EXTRA: "PLATFORM=arm-linux-gnueabihf floatsize=32" }
 
 linux-armv7-64:
   extends: .linux
-  variables: { PACKAGES: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross", EXT: "linux-arm-64.so", MAKEFLAGS_EXTRA: "PLATFORM=arm-linux-gnueabihf floatsize=64" }
+  variables: { PACKAGES: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross", EXT: "linux-armv7-64.so", MAKEFLAGS_EXTRA: "PLATFORM=arm-linux-gnueabihf floatsize=64" }
+
 
 .windows:
   stage: build
@@ -89,7 +90,7 @@ linux-armv7-64:
     - curl -fsSL -o /tmp/pd.zip "$PD_URL" && unzip -q /tmp/pd.zip -d /tmp/pdwin
     - export PDBINDIR=$(dirname "$(find /tmp/pdwin -name pd.dll | head -1)")
   script:
-    - make PDINCLUDEDIR=$PDINCLUDEDIR PDBINDIR=$PDBINDIR PLATFORM=$TRIPLET extension=$EXT
+    - make PDINCLUDEDIR=$PDINCLUDEDIR PDBINDIR=$PDBINDIR PLATFORM=$TRIPLET extension=$EXT $MAKEFLAGS_EXTRA
     - mkdir -p out && cp *.$EXT out/
 
 windows-i386:
@@ -100,7 +101,8 @@ windows-amd64-32:
   extends: .windows
   variables: { PACKAGES: "gcc-mingw-w64-x86-64", TRIPLET: "x86_64-w64-mingw32", EXT: "windows-amd64-32.dll", PD_URL: "$PD_WIN64_URL", MAKEFLAGS_EXTRA: "floatsize=32" }
 
-windows-amd64-64:
+# we would need a pd64 Windows binary which isn't available on Miller's site
+.windows-amd64-64:
   extends: .windows
   variables: { PACKAGES: "gcc-mingw-w64-x86-64", TRIPLET: "x86_64-w64-mingw32", EXT: "windows-amd64-64.dll", PD_URL: "$PD_WIN64_URL", MAKEFLAGS_EXTRA: "floatsize=64"}
 

@@ -1,4 +1,4 @@
-#N canvas 60 35 820 815 12;
+#N canvas 4 35 820 815 12;
 #X obj 20 15 cnv 15 760 40 empty empty tapmatrix~ 12 20 0 24 #e0e0e0 #404040 0;
 #X text 18 64 [tapmatrix~ [-float|-fixed] [-oversample] <ins> <outs> <maxdelay-ms> [ramp-ms]]: one multichannel signal in (<ins> channels) \, one out (<outs> channels). Each output is the sum of its taps. 4-point interpolation as delread4~., f 104;
 #X text 20 111 -float (default): 32-bit float. -fixed: 16-bit fixed point (ESP32-P4 SIMD: several times faster \; elsewhere for testing \; signals within -1..1). -oversample: the delay line read at 2x: flat up to 20 kHz \, float only \, delays from 25 samples., f 104;

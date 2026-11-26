@@ -52,11 +52,67 @@
 
 static int tm_avx2;                 /* this CPU can run the functions below */
 
+// cpuid-based detection
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
+
+static uint64_t tm_xgetbv(unsigned int index)
+{
+#if defined(_MSC_VER)
+    return _xgetbv(index);
+#else
+    uint32_t eax, edx;
+    __asm__ volatile ("xgetbv"
+                      : "=a"(eax), "=d"(edx)
+                      : "c"(index));
+    return ((uint64_t)edx << 32) | eax;
+#endif
+}
+
+static int tm_has_avx2_fma(void)
+{
+    unsigned int eax, ebx, ecx, edx;
+
+#if defined(_MSC_VER)
+    int regs[4];
+    __cpuid(regs, 1);
+    ecx = regs[2];
+    __cpuidex(regs, 7, 0);
+    ebx = regs[1];
+#else
+    if (__get_cpuid_max(0, 0) < 7)
+        return 0;
+
+    __cpuid(1, eax, ebx, ecx, edx);
+
+    /* AVX, OSXSAVE and FMA */
+    if ((ecx & ((1u << 28) | (1u << 27) | (1u << 12)))
+        != ((1u << 28) | (1u << 27) | (1u << 12)))
+        return 0;
+
+    /* OS must enable XMM and YMM state */
+    if ((tm_xgetbv(0) & 0x6) != 0x6)
+        return 0;
+
+    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+#endif
+
+    return (ebx & (1u << 5)) != 0; /* AVX2 */
+}
+
 /* at class setup: ask the CPU (CPUID) once */
 static void tm_avx2_init(void)
 {
-    __builtin_cpu_init();
-    tm_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+    #if 0 // __builtin_cpu_supports doesn't seem to exist on older clang
+        __builtin_cpu_init();
+        tm_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+    #else
+        tm_avx2 = tm_has_avx2_fma();
+    #endif
 }
 
 /* one static tap: out[i] += h0 x[i] + h1 x[i-1] + h2 x[i-2] + h3 x[i-3], 8 at a time.
