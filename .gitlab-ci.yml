@@ -36,6 +36,7 @@ stages: [build, test, package, deploy]
     paths: [out/]
     expire_in: 1 week
 
+
 .pd_headers: &pd_headers
   - git clone --depth 1 --branch "$PD_VERSION" "$PD_SRC_URL" /tmp/pure-data
   - export PDINCLUDEDIR=/tmp/pure-data/src
@@ -53,21 +54,29 @@ stages: [build, test, package, deploy]
     - sh tests/check_glibc.sh "$GLIBC_MAX" *.$EXT
     - mkdir -p out && cp *.$EXT out/
 
-linux-amd64:
+linux-amd64-32:
   extends: .linux
-  variables: { PACKAGES: "gcc libc6-dev", EXT: "l_amd64", MAKEFLAGS_EXTRA: "" }
+  variables: { PACKAGES: "gcc libc6-dev", EXT: "linux-amd64-32.so", MAKEFLAGS_EXTRA: "floatsize=32" }
 
 linux-amd64-64:
   extends: .linux
   variables: { PACKAGES: "gcc libc6-dev", EXT: "linux-amd64-64.so", MAKEFLAGS_EXTRA: "floatsize=64" }
 
-linux-arm64:
+linux-arm64-32:
   extends: .linux
-  variables: { PACKAGES: "gcc-aarch64-linux-gnu libc6-dev-arm64-cross", EXT: "l_arm64", MAKEFLAGS_EXTRA: "PLATFORM=aarch64-linux-gnu" }
+  variables: { PACKAGES: "gcc-aarch64-linux-gnu libc6-dev-arm64-cross", EXT: "linux-arm64-32.so", MAKEFLAGS_EXTRA: "PLATFORM=aarch64-linux-gnu floatsize=32" }
 
-linux-armv7:
+linux-arm64-64:
   extends: .linux
-  variables: { PACKAGES: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross", EXT: "l_arm", MAKEFLAGS_EXTRA: "PLATFORM=arm-linux-gnueabihf" }
+  variables: { PACKAGES: "gcc-aarch64-linux-gnu libc6-dev-arm64-cross", EXT: "linux-arm64-64.so", MAKEFLAGS_EXTRA: "PLATFORM=aarch64-linux-gnu floatsize=64" }
+
+linux-armv7-32:
+  extends: .linux
+  variables: { PACKAGES: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross", EXT: "linux-arm-32.so", MAKEFLAGS_EXTRA: "PLATFORM=arm-linux-gnueabihf floatsize=32" }
+
+linux-armv7-64:
+  extends: .linux
+  variables: { PACKAGES: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross", EXT: "linux-arm-64.so", MAKEFLAGS_EXTRA: "PLATFORM=arm-linux-gnueabihf floatsize=64" }
 
 .windows:
   stage: build
@@ -83,13 +92,18 @@ linux-armv7:
     - make PDINCLUDEDIR=$PDINCLUDEDIR PDBINDIR=$PDBINDIR PLATFORM=$TRIPLET extension=$EXT
     - mkdir -p out && cp *.$EXT out/
 
-windows-amd64:
-  extends: .windows
-  variables: { PACKAGES: "gcc-mingw-w64-x86-64", TRIPLET: "x86_64-w64-mingw32", EXT: "m_amd64", PD_URL: "$PD_WIN64_URL" }
-
 windows-i386:
   extends: .windows
   variables: { PACKAGES: "gcc-mingw-w64-i686", TRIPLET: "i686-w64-mingw32", EXT: "m_i386", PD_URL: "$PD_WIN32_URL" }
+
+windows-amd64-32:
+  extends: .windows
+  variables: { PACKAGES: "gcc-mingw-w64-x86-64", TRIPLET: "x86_64-w64-mingw32", EXT: "windows-amd64-32.dll", PD_URL: "$PD_WIN64_URL", MAKEFLAGS_EXTRA: "floatsize=32" }
+
+windows-amd64-64:
+  extends: .windows
+  variables: { PACKAGES: "gcc-mingw-w64-x86-64", TRIPLET: "x86_64-w64-mingw32", EXT: "windows-amd64-64.dll", PD_URL: "$PD_WIN64_URL", MAKEFLAGS_EXTRA: "floatsize=64"}
+
 
 .macos-fat:
   stage: build
@@ -102,9 +116,9 @@ windows-i386:
     - make PDINCLUDEDIR=$PDINCLUDEDIR extension=$EXT arch="$MACOS_ARCHS"
     - mkdir -p out && cp $EXT out/
 
-macos:
+macos-32:
   extends: .macos-fat
-  variables: { EXT: "d_fat", MAKEFLAGS_EXTRA: "" }
+  variables: { EXT: "darwin-fat-32.so", MAKEFLAGS_EXTRA: "floatsize=32" }
 
 macos-64:
   extends: .macos-fat
