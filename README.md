@@ -104,4 +104,4 @@ make test PDINCLUDEDIR=/path/to/libpd/pure-data/src LIBPD_DIR=/path/to/libpd   #
 
 ## License
 
-BSD 3-Clause, see [LICENSE.txt](LICENSE.txt).
+GNU General Public License 3, see [LICENSE.txt](LICENSE.txt).
