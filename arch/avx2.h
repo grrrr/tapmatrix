@@ -107,11 +107,8 @@ static int tm_has_avx2_fma(void)
 /* at class setup: ask the CPU (CPUID) once */
 static void tm_avx2_init(void)
 {
-    #if __has_builtin(__builtin_cpu_supports)
-        #if __has_builtin(__builtin_cpu_init)
-        // gcc needs it, clang obviously doesn't
+    #if 0 // __builtin_cpu_supports doesn't seem to exist on older clang
         __builtin_cpu_init();
-        #endif
         tm_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
     #else
         tm_avx2 = tm_has_avx2_fma();
