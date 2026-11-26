@@ -20,6 +20,7 @@ variables:
   PD_WIN32_URL: "https://msp.ucsd.edu/Software/pd-${PD_VERSION}-i386.msw.zip"
   GIT_SUBMODULE_STRATEGY: recursive   # pd-lib-builder
   GIT_SUBMODULE_FORCE_HTTPS: "true"
+  MACOS_ARCHS: "x86_64 arm64"
 
 stages: [build, test, package, deploy]
 
@@ -28,25 +29,29 @@ stages: [build, test, package, deploy]
     - docker
     - default
 
+.build:
+  extends: .docker
+  image: $CI_REGISTRY/docker/pd_max
+  artifacts:
+    paths: [out/]
+    expire_in: 1 week
+
 .pd_headers: &pd_headers
   - git clone --depth 1 --branch "$PD_VERSION" "$PD_SRC_URL" /tmp/pure-data
   - export PDINCLUDEDIR=/tmp/pure-data/src
 
 .linux:
   stage: build
-  image: debian:trixie
-  extends: .docker
+#  image: debian:trixie
+  extends: .build
   before_script:
-    - apt-get update -qq
-    - apt-get install -y -qq --no-install-recommends make git ca-certificates binutils $PACKAGES
+#    - apt-get update -qq
+#    - apt-get install -y -qq --no-install-recommends make git ca-certificates binutils $PACKAGES
     - *pd_headers
   script:
     - make PDINCLUDEDIR=$PDINCLUDEDIR $MAKEFLAGS_EXTRA extension=$EXT
     - sh tests/check_glibc.sh "$GLIBC_MAX" *.$EXT
     - mkdir -p out && cp *.$EXT out/
-  artifacts:
-    paths: [out/]
-    expire_in: 1 week
 
 linux-amd64:
   extends: .linux
@@ -66,20 +71,17 @@ linux-armv7:
 
 .windows:
   stage: build
-  image: debian:trixie
-  extends: .docker
+#  image: debian:trixie
+  extends: .build
   before_script:
-    - apt-get update -qq
-    - apt-get install -y -qq --no-install-recommends make git ca-certificates curl unzip $PACKAGES
+#    - apt-get update -qq
+#    - apt-get install -y -qq --no-install-recommends make git ca-certificates curl unzip $PACKAGES
     - *pd_headers
     - curl -fsSL -o /tmp/pd.zip "$PD_URL" && unzip -q /tmp/pd.zip -d /tmp/pdwin
     - export PDBINDIR=$(dirname "$(find /tmp/pdwin -name pd.dll | head -1)")
   script:
     - make PDINCLUDEDIR=$PDINCLUDEDIR PDBINDIR=$PDBINDIR PLATFORM=$TRIPLET extension=$EXT
     - mkdir -p out && cp *.$EXT out/
-  artifacts:
-    paths: [out/]
-    expire_in: 1 week
 
 windows-amd64:
   extends: .windows
@@ -89,18 +91,25 @@ windows-i386:
   extends: .windows
   variables: { PACKAGES: "gcc-mingw-w64-i686", TRIPLET: "i686-w64-mingw32", EXT: "m_i386", PD_URL: "$PD_WIN32_URL" }
 
-macos-fat:
+.macos-fat:
   stage: build
-  tags: [$MACOS_RUNNER_TAG]
-  rules:
-    - if: $MACOS_RUNNER_TAG
+#  tags: [$MACOS_RUNNER_TAG]
+#  rules:
+#    - if: $MACOS_RUNNER_TAG
+  extends: .build
   script:
-    - git clone --depth 1 --branch "$PD_VERSION" "$PD_SRC_URL" /tmp/pure-data
-    - make PDINCLUDEDIR=/tmp/pure-data/src extension=d_fat arch="x86_64 arm64"
-    - mkdir -p out && cp *.d_fat out/
-  artifacts:
-    paths: [out/]
-    expire_in: 1 week
+    - *pd_headers
+    - make PDINCLUDEDIR=$PDINCLUDEDIR extension=$EXT arch="$MACOS_ARCHS"
+    - mkdir -p out && cp $EXT out/
+
+macos:
+  extends: .macos-fat
+  variables: { EXT: "d_fat", MAKEFLAGS_EXTRA: "" }
+
+macos-64:
+  extends: .macos-fat
+  variables: { EXT: "darwin-fat-64.so", MAKEFLAGS_EXTRA: "floatsize=64" }
+
 
 # the host tests (tests/): the Linux build against libpd, compared with Pd's own
 # delwrite~ -> line~ -> delread4~ chain and an ideal double-precision computation
@@ -133,8 +142,8 @@ package:
   script:
     - VERSION="${CI_COMMIT_TAG#v}"; VERSION="${VERSION:-0.0.0-$CI_COMMIT_SHORT_SHA}"
     - mkdir -p bin/tapmatrix~ src/tapmatrix~ dek
-    - cp out/* tapmatrix~-help.pd tapmatrix~.pd tapmatrix.*~.pd README.md LICENSE.txt bin/tapmatrix~/
-    - cp tapmatrix~.c Makefile tapmatrix~-help.pd tapmatrix~.pd tapmatrix.*~.pd README.md LICENSE.txt src/tapmatrix~/ && cp -r arch tests src/tapmatrix~/
+    - cp out/* README.md LICENSE.txt tapmatrix*.pd bin/tapmatrix~/
+    - cp tapmatrix~.c Makefile tapmatrix*.pd README.md LICENSE.txt src/tapmatrix~/ && cp -r arch tests src/tapmatrix~/
     - (cd bin && deken package --version "$VERSION" tapmatrix~ && mv *.dek* ../dek/)
     - (cd src && deken package --version "$VERSION" tapmatrix~ && mv *.dek* ../dek/)
     - ls -l dek
