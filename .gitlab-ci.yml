@@ -101,7 +101,8 @@ windows-amd64-32:
   extends: .windows
   variables: { PACKAGES: "gcc-mingw-w64-x86-64", TRIPLET: "x86_64-w64-mingw32", EXT: "windows-amd64-32.dll", PD_URL: "$PD_WIN64_URL", MAKEFLAGS_EXTRA: "floatsize=32" }
 
-windows-amd64-64:
+# we would need a pd64 Windows binary which isn't available on Miller's site
+.windows-amd64-64:
   extends: .windows
   variables: { PACKAGES: "gcc-mingw-w64-x86-64", TRIPLET: "x86_64-w64-mingw32", EXT: "windows-amd64-64.dll", PD_URL: "$PD_WIN64_URL", MAKEFLAGS_EXTRA: "floatsize=64"}
 
