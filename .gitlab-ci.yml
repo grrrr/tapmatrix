@@ -113,7 +113,7 @@ windows-amd64-64:
   extends: .build
   script:
     - *pd_headers
-    - make PDINCLUDEDIR=$PDINCLUDEDIR extension=$EXT arch="$MACOS_ARCHS"
+    - make PDINCLUDEDIR=$PDINCLUDEDIR extension=$EXT arch="$MACOS_ARCHS" CXX=o64-clang++ CC=o64-clang
     - mkdir -p out && cp *.$EXT out/
 
 macos-32:
