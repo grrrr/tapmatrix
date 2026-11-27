@@ -1,7 +1,8 @@
 /* The SIMD float kernels (arch/neon.h, arch/avx2.h) against the scalar ones
  * (arch/scalar.h): static taps (fir4) and moving taps (moving) with random
  * delays, gains and ramps, also near the ends of the ring (the mirror) and
- * near the kernels' limits on |dd|. No Pd needed.
+ * near the kernels' limits on |dd|. And the fixed engine's skip of a silent
+ * moving tap (fixed_ramp_skip): later blocks as without it. No Pd needed.
  *   cc -O2 -I<pd>/src -o kerneltest kerneltest.c -lm && ./kerneltest
  * Prints the largest difference relative to the output's peak, per kernel. */
 #include <math.h>
@@ -13,6 +14,7 @@
 #include "../arch/scalar.h"
 #include "../arch/neon.h"
 #include "../arch/avx2.h"
+#include "../arch/fixed.h"
 
 #define LEN 1024                    /* ring length (power of 2) */
 #define N 64                        /* block */
@@ -41,8 +43,44 @@ static double maxdiff(const t_sample *a, const t_sample *b, int n, double *peak)
     return m;
 }
 
+/* fixed engine: a ramp whose first blocks are skipped (fixed_ramp_skip) must give
+   the same later blocks (windows, fractions, gains) and state as one computed
+   throughout (fixed_ramp_block). Exact: integers only. */
+static int fixed_skip_test(void)
+{
+#if TAPMATRIX_FIXED
+    static int16_t qr[MIR + LEN];
+    int bad = 0;
+    for (int trial = 0; trial < 20000; trial++) {
+        const int w = (rand() % (LEN / N)) * N, nb = 1 + rand() % 40, m = rand() % (nb + 1);
+        const t_sample d0 = (t_sample)urand(1, LEN - 3 * N), dd = (t_sample)urand(-1.0 / 7, 1.0 / 7);
+        const t_sample g0 = (t_sample)urand(0, 0.9), gd = (t_sample)urand(-0.9, 0.9) / (nb * N);
+        t_fixedtap a, b;
+        int diff = 0;
+        t_mvtap ma, mb;
+        memset(&a, 0, sizeof(a));
+        fixed_ramp_start(&a, w, d0, dd, g0, gd);
+        b = a;
+        for (int k = 0; k < nb; k++) {
+            fixed_ramp_block(&a, &ma, qr, LEN, LEN - 1, MIR, N);
+            if (k < m) fixed_ramp_skip(&b, N);
+            else {
+                fixed_ramp_block(&b, &mb, qr, LEN, LEN - 1, MIR, N);
+                diff |= memcmp(&ma, &mb, sizeof(ma)) != 0;
+            }
+        }
+        bad += diff || a.T != b.T || a.G != b.G;
+    }
+    printf("%s fixed skip: %d of 20000 ramps differ after skipped blocks\n", bad ? "FAIL" : "PASS", bad);
+    return bad != 0;
+#else
+    return 0;
+#endif
+}
+
 int main(void)
 {
+    if (fixed_skip_test()) return 1;
     const char *name = TAPMATRIX_AVX2 ? "avx2" : TAPMATRIX_NEON ? "neon" : "none";
     tm_avx2_init();
 #if TAPMATRIX_AVX2
