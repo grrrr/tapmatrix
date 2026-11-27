@@ -24,7 +24,7 @@ run: run.c
 
 # the SIMD float kernels against the scalar ones (needs only Pd's headers)
 PDINCLUDEDIR ?= $(LIBPD_DIR)/pure-data/src
-kerneltest: kerneltest.c ../arch/scalar.h ../arch/neon.h ../arch/avx2.h
+kerneltest: kerneltest.c ../arch/scalar.h ../arch/neon.h ../arch/avx2.h ../arch/fixed.h
 	$(CC) -O2 -I$(PDINCLUDEDIR) $< -lm -o $@
 
 .PHONY: clean

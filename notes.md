@@ -86,6 +86,16 @@ The AVX2 kernels are chosen at run time (`__builtin_cpu_supports`): the binaries
 The static FIR loop costs ~31 cycles per tap and sample in the generic build and ~18 with the NEON flags (GCC vectorises it only with `-ffast-math`, as NEON floats are not fully IEEE). The moving loop (~92 cycles per tap and sample) does not vectorise. So 8×32 with moving sources needs a NEON engine (float, intrinsics, the structure of the PIE kernels: 4 output samples per vector). Not written yet (open).
 
 
+**Silent moving taps skipped** (Apple M1 Pro, macOS 15, Apple clang 14 -O3 -ffast-math (pd-lib-builder), NEON, Pd 0.56-2 `-batch`; 2026-11-27). `[tapmatrix~ 16 64]`, 16 sources, a `rowl` per source every 20 ms with a 20 ms ramp (so all 1024 cells ramp all the time), 12 of 64 cells per source on, the rest at gain 0; µs per 64-sample block from `stats` (`us-total`), median of 5 runs of 2000 blocks, moving taps computed per block in brackets:
+
+| | before (main) | `skip 0` | `skip 1` (the default) |
+|---|---|---|---|
+| float | 70.4 (1024) | 71.9 (1024) | 32.1 (194) |
+| `-oversample` | 101.1 (1024) | 101.3 (1024) | 40.1 (194) |
+| `-fixed` (host C kernels: not a speed figure) | 546 (1024) | 546 (1024) | 149 (194) |
+
+Before, only static taps with gain 0 were skipped: a moving source paid for all its speakers. What is left at `skip 1`: the 194 audible moving taps and the per-cell work of the block loop (ramp ends, branches) for all 1024.
+
 ## CI and releases
 
 `.gitlab-ci.yml` builds the external on Debian trixie for Linux (amd64, arm64, armv7), Windows (amd64, i386) and macOS (`d_fat`: x86_64 + arm64).

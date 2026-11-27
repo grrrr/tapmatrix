@@ -177,6 +177,14 @@ static void fixed_ramp_block(t_fixedtap *t, t_mvtap *m, const int16_t *qr, int l
     t->G = G;
 }
 
+/* a silent block of the ramp (gain 0 throughout: G == G8 == 0), not computed: only
+   on to the next block, exactly as fixed_ramp_block() would go (n/8 chunks) */
+static inline void fixed_ramp_skip(t_fixedtap *t, int n)
+{
+    t->T += t->inc * 8 * (uint64_t)(n >> 3);
+    t->G += t->G8 * (n >> 3);
+}
+
 /* n samples -> fixed, rounded, saturated */
 static inline void fixed_from(const t_sample *r, int16_t *q, int n)
 {

@@ -40,6 +40,9 @@
  *                                               <us-total> <us-inputs> <us-moving-prep>
  *                                               <us-moving-kernel> <us-static-kernel>"
  *   fixedshift <n>                                accumulator shift for PIE (test)
+ *   skip 0|1                                    skip moving taps silent in a block
+ *                                               (gain 0 at both ends; 1, the default)
+ *                                               or compute them (0: test reference)
  *
  * How it computes (per block of n samples): the inputs go into ring buffers
  * (PSRAM, via getbytes; the last n+3 samples mirrored in front, so a block's
@@ -47,7 +50,8 @@
  * in this block is a 4-tap FIR with the gain folded into its coefficients,
  * added straight into the output. A moving tap ramps its delay and gain per
  * sample; its read position is a 32.32 integer. Ramps are counted in whole
- * blocks, each block's values computed from the ramp's ends.
+ * blocks, each block's values computed from the ramp's ends. A tap with gain 0
+ * is not computed, also while it moves (gain 0 at both ends of the block).
  */
 /* 32-bit Linux (armhf) with a 64-bit time_t default (Debian trixie and later):
    clock_gettime() would become __clock_gettime64@GLIBC_2.34 and the binary would
@@ -108,6 +112,7 @@ typedef struct _tapmatrix {
     t_mvtap *x_mv;                  /* [ins], moving taps of one output */
     void *x_mvmem;
     int x_qshift;
+    int x_skip;                     /* skip silent moving taps (1; "skip 0": a test switch) */
     int x_check;                    /* blocks still to compare */
     int x_stats;                    /* blocks still to count ("stats") */
     uint32_t x_st[8];               /* blocks, fixed moving, float moving, cycles:
@@ -402,6 +407,13 @@ static void tapmatrix_fixedshift(t_tapmatrix *x, t_floatarg f)
     x->x_qshift = f;
 }
 
+/* skip 0|1: skip the moving taps silent in a block (1, the default) or compute
+   them anyway (0: the reference for tests/skiptest.py, and the cost without it) */
+static void tapmatrix_skip(t_tapmatrix *x, t_floatarg f)
+{
+    x->x_skip = f != 0;
+}
+
 static void tapmatrix_report(t_tapmatrix *x)
 {
     t_atom a[3];
@@ -484,18 +496,35 @@ static t_int *tapmatrix_perform(t_int *w)
                 t->g = t->left ? t->gfrom + (t->gto - t->gfrom) * u : t->gto;
                 t->hvalid = 0;
                 const t_sample dd = (t->d - d0) * inv_n, gd = (t->g - g0) * inv_n;
+                /* Silent in this block: gain 0 at both ends (g0 == 0, gd == 0), so
+                   the kernel would only add zeros. In WFS most speakers of a moving
+                   source are off (sweet-spot selection), yet each position update
+                   puts all its taps into a ramp: without this, every one of them
+                   ran the moving kernel. Skipped, the tap only goes on to the next
+                   block as the kernel would: the float kernels keep no state across
+                   blocks (d, g above are all), the fixed engine's ramp state does
+                   (fixed_ramp_skip). x_skip = 0 ("skip 0"): computed anyway, the
+                   reference for tests/skiptest.py. */
+                const int silent = x->x_skip && g0 == 0 && t->g == 0;
                 const uint32_t cp = CYCLES();
                 if (fixed && tm_fabs(dd) < TMK(1.0 / 7)) {
                     /* the ramp's step from its ends: the per-block values carry
                        float rounding (0.0015 samples over a ramp at 2200 samples) */
                     if (!t->q.mv) fixed_ramp_start(&t->q, wpos, d0, (t->dto - t->dfrom) * t->inb * inv_n,
                                            g0, (t->gto - t->gfrom) * t->inb * inv_n);
-
-                    fixed_ramp_block(&t->q, &x->x_mv[nm++], x->x_qring + c * stride, len, mask, mir, n);
+                    /* silent only if the fixed gain ramp, which runs on from the
+                       ramp's start, is 0 as well: then the kernel's output is 0 */
+                    const int skip = silent && !t->q.G && !t->q.G8;
+                    if (skip) fixed_ramp_skip(&t->q, n);
+                    else fixed_ramp_block(&t->q, &x->x_mv[nm++], x->x_qring + c * stride, len, mask, mir, n);
                     if (!t->left) t->q.mv = 0;
-                    n_mq++;
                     c_prep += CYCLES() - cp;
-                    if (x->x_check) moving(r + mir, mask, wpos, d0, dd, g0, gd, x->x_fcheck, n);
+                    if (!skip) {
+                        n_mq++;
+                        if (x->x_check) moving(r + mir, mask, wpos, d0, dd, g0, gd, x->x_fcheck, n);
+                    }
+                } else if (silent) {
+                    t->q.mv = 0;    /* as the float paths below: a fixed ramp starts anew */
                 } else if (x->x_os) {
                     const t_sample *orr = x->x_oring + c * stride + mir;
 #if TAPMATRIX_AVX2
@@ -666,6 +695,7 @@ static void *tapmatrix_new(t_symbol *s, int argc, t_atom *argv)
     x->x_qcoef = (int16_t *)getbytes(x->x_ins * 4 * sizeof(int16_t));
     x->x_qsrc = (const int16_t **)getbytes(x->x_ins * sizeof(int16_t *));
     x->x_qshift = 15;
+    x->x_skip = 1;
     x->x_clock = clock_new(x, (t_method)tapmatrix_report);
     x->x_sclock = clock_new(x, (t_method)tapmatrix_stats_report);
     outlet_new(&x->x_obj, &s_signal);
@@ -704,4 +734,5 @@ void tapmatrix_tilde_setup(void)
     class_addmethod(tapmatrix_class, (t_method)tapmatrix_check, gensym("check"), A_FLOAT, 0);
     class_addmethod(tapmatrix_class, (t_method)tapmatrix_stats, gensym("stats"), A_FLOAT, 0);
     class_addmethod(tapmatrix_class, (t_method)tapmatrix_fixedshift, gensym("fixedshift"), A_FLOAT, 0);
+    class_addmethod(tapmatrix_class, (t_method)tapmatrix_skip, gensym("skip"), A_FLOAT, 0);
 }
